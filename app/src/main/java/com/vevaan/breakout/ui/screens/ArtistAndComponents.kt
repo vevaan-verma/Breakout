@@ -636,6 +636,7 @@ internal fun LeagueDrawer(
                 BreakoutCard {
                     Text("Navigate", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                     DrawerNavRow("League Settings", BreakoutTab.League, onNavigate)
+                    DrawerNavRow("Trades", BreakoutTab.Trades, onNavigate)
                     DrawerNavRow("All Matchups", BreakoutTab.AllMatchups, onNavigate)
                     if (activeLeague.draftStatus == DraftStatus.Complete) {
                         DrawerNavRow("Draft Summary", BreakoutTab.DraftSummary, onNavigate)
@@ -2258,10 +2259,10 @@ internal fun AccentButton(
 }
 
 @Composable
-internal fun DangerButton(text: String, onClick: () -> Unit) {
+internal fun DangerButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Button(
         onClick = onClick,
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .heightIn(min = BreakoutDimensions.MinimumTouchTarget),
         colors = ButtonDefaults.buttonColors(containerColor = BreakoutCoral.copy(alpha = 0.28f)),
@@ -2957,6 +2958,22 @@ internal fun friendlyLeagueError(rawMessage: String?): String {
         message.contains("duplicate key", ignoreCase = true) ||
             message.contains("invite_code", ignoreCase = true) -> "That invite code was already used. Try creating the league again."
         else -> "Could not create league. Please try again."
+    }
+}
+
+internal fun friendlyTradeError(rawMessage: String?): String {
+    val message = normalizedErrorText(rawMessage)
+    return when {
+        isAuthFailure(message) -> "Your session expired. Please log in again."
+        message.contains("not a member", ignoreCase = true) -> "That member is not available for trades."
+        message.contains("not active", ignoreCase = true) -> "That trade is no longer active."
+        message.contains("expired", ignoreCase = true) -> "That trade offer has expired."
+        message.contains("no longer has", ignoreCase = true) ||
+            message.contains("already moved", ignoreCase = true) -> "One of those artists moved rosters. Refresh trades and try again."
+        message.contains("does not fit", ignoreCase = true) ||
+            message.contains("slot", ignoreCase = true) -> "That trade does not fit both roster slots."
+        message.contains("draft", ignoreCase = true) && message.contains("complete", ignoreCase = true) -> "Trades open after the draft is complete."
+        else -> "Could not complete that trade. Refresh and try again."
     }
 }
 

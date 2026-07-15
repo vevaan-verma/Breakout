@@ -281,6 +281,26 @@ create table if not exists public.notifications (
     created_at timestamptz not null default now()
 );
 
+create table if not exists public.trade_offers (
+    id uuid primary key default gen_random_uuid(),
+    league_id uuid not null references public.leagues(id) on delete cascade,
+    proposer_id uuid not null references public.profiles(id) on delete cascade,
+    recipient_id uuid not null references public.profiles(id) on delete cascade,
+    offered_artist_id uuid not null references public.artists(id) on delete cascade,
+    requested_artist_id uuid not null references public.artists(id) on delete cascade,
+    offered_roster_slot text not null,
+    requested_roster_slot text not null,
+    status text not null default 'pending',
+    created_at timestamptz not null default now(),
+    expires_at timestamptz not null default (now() + interval '48 hours'),
+    responded_at timestamptz,
+    constraint trade_offers_status_check check (status in ('pending', 'accepted', 'declined', 'canceled', 'expired')),
+    constraint trade_offers_no_self_check check (proposer_id <> recipient_id)
+);
+
+alter table public.trade_offers add column if not exists expires_at timestamptz not null default (now() + interval '48 hours');
+alter table public.trade_offers add column if not exists responded_at timestamptz;
+
 alter table public.profiles enable row level security;
 alter table public.leagues enable row level security;
 alter table public.league_members enable row level security;
@@ -293,6 +313,7 @@ alter table public.rosters enable row level security;
 alter table public.waiver_claims enable row level security;
 alter table public.draft_picks enable row level security;
 alter table public.notifications enable row level security;
+alter table public.trade_offers enable row level security;
 
 drop policy if exists "Users can read their profile" on public.profiles;
 create policy "Users can read their profile"
@@ -1601,6 +1622,331 @@ create policy "Users can update their notifications"
 on public.notifications for update
 using (auth.uid() = user_id);
 
+drop policy if exists "Members can read league trade offers" on public.trade_offers;
+create policy "Members can read league trade offers"
+on public.trade_offers for select
+using (
+    exists (
+        select 1 from public.league_members
+        where league_members.league_id = trade_offers.league_id
+        and league_members.user_id = auth.uid()
+        and league_members.status = 'active'
+    )
+);
+
+create or replace function public.artist_fits_roster_slot(target_artist_id uuid, target_slot text)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    audience bigint;
+begin
+    if target_slot is null or target_slot = '' then
+        return false;
+    end if;
+    if target_slot ilike 'Bench%' then
+        return true;
+    end if;
+
+    select coalesce(listeners, 0) into audience
+    from public.artists
+    where id = target_artist_id;
+
+    if target_slot ilike 'Headliner%' then
+        return audience >= 50000000;
+    elsif target_slot ilike 'Wildcard%' then
+        return audience >= 12000000 and audience < 50000000;
+    elsif target_slot ilike 'Rising%' then
+        return audience >= 1000000 and audience < 12000000;
+    elsif target_slot ilike 'DeepCut%' then
+        return audience < 1000000;
+    end if;
+
+    return false;
+end;
+$$;
+
+grant execute on function public.artist_fits_roster_slot(uuid, text) to authenticated;
+
+drop function if exists public.create_trade_offer(uuid, text, text, text);
+create or replace function public.create_trade_offer(
+    target_league_id uuid,
+    target_username text,
+    offered_artist_name text,
+    requested_artist_name text
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    proposer uuid := auth.uid();
+    recipient uuid;
+    offered_roster public.rosters%rowtype;
+    requested_roster public.rosters%rowtype;
+    trade_id uuid;
+begin
+    if proposer is null then
+        raise exception 'Authentication required';
+    end if;
+
+    select profiles.id into recipient
+    from public.profiles
+    join public.league_members on league_members.user_id = profiles.id
+    where league_members.league_id = target_league_id
+    and league_members.status = 'active'
+    and lower(profiles.username) = lower(trim(target_username))
+    limit 1;
+
+    if recipient is null then
+        raise exception 'That member is no longer in this league';
+    end if;
+    if recipient = proposer then
+        raise exception 'You cannot trade with yourself';
+    end if;
+
+    if not exists (
+        select 1 from public.league_members
+        where league_id = target_league_id
+        and user_id = proposer
+        and status = 'active'
+    ) then
+        raise exception 'You are not in this league';
+    end if;
+
+    select rosters.* into offered_roster
+    from public.rosters
+    join public.artists on artists.id = rosters.artist_id
+    where rosters.league_id = target_league_id
+    and rosters.user_id = proposer
+    and rosters.released_at is null
+    and lower(coalesce(artists.display_name, artists.normalized_name)) = lower(trim(offered_artist_name))
+    limit 1;
+
+    select rosters.* into requested_roster
+    from public.rosters
+    join public.artists on artists.id = rosters.artist_id
+    where rosters.league_id = target_league_id
+    and rosters.user_id = recipient
+    and rosters.released_at is null
+    and lower(coalesce(artists.display_name, artists.normalized_name)) = lower(trim(requested_artist_name))
+    limit 1;
+
+    if offered_roster.id is null then
+        raise exception 'You no longer have that artist on your roster';
+    end if;
+    if requested_roster.id is null then
+        raise exception 'That member no longer has the requested artist';
+    end if;
+    if not public.artist_fits_roster_slot(requested_roster.artist_id, offered_roster.roster_slot) then
+        raise exception 'Requested artist does not fit your roster slot';
+    end if;
+    if not public.artist_fits_roster_slot(offered_roster.artist_id, requested_roster.roster_slot) then
+        raise exception 'Offered artist does not fit the other roster slot';
+    end if;
+
+    insert into public.trade_offers (
+        league_id,
+        proposer_id,
+        recipient_id,
+        offered_artist_id,
+        requested_artist_id,
+        offered_roster_slot,
+        requested_roster_slot
+    )
+    values (
+        target_league_id,
+        proposer,
+        recipient,
+        offered_roster.artist_id,
+        requested_roster.artist_id,
+        offered_roster.roster_slot,
+        requested_roster.roster_slot
+    )
+    returning id into trade_id;
+
+    insert into public.notifications (user_id, league_id, kind, title, body)
+    values (
+        recipient,
+        target_league_id,
+        'trade_offer',
+        'New trade offer',
+        'A member sent you a trade offer.'
+    );
+
+    return trade_id;
+end;
+$$;
+
+grant execute on function public.create_trade_offer(uuid, text, text, text) to authenticated;
+
+drop function if exists public.respond_trade_offer(uuid, text);
+create or replace function public.respond_trade_offer(target_trade_id uuid, response text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    actor uuid := auth.uid();
+    trade public.trade_offers%rowtype;
+    offered_roster public.rosters%rowtype;
+    requested_roster public.rosters%rowtype;
+begin
+    if actor is null then
+        raise exception 'Authentication required';
+    end if;
+
+    select * into trade
+    from public.trade_offers
+    where id = target_trade_id
+    for update;
+
+    if trade.id is null then
+        raise exception 'Trade offer not found';
+    end if;
+    if trade.status <> 'pending' then
+        raise exception 'This trade is no longer pending';
+    end if;
+    if trade.expires_at <= now() then
+        update public.trade_offers
+        set status = 'expired', responded_at = now()
+        where id = trade.id;
+        raise exception 'This trade offer has expired';
+    end if;
+
+    if response = 'cancel' then
+        if actor <> trade.proposer_id then
+            raise exception 'Only the sender can cancel this trade';
+        end if;
+        update public.trade_offers set status = 'canceled', responded_at = now() where id = trade.id;
+        return;
+    end if;
+
+    if actor <> trade.recipient_id then
+        raise exception 'Only the recipient can respond to this trade';
+    end if;
+
+    if response = 'decline' then
+        update public.trade_offers set status = 'declined', responded_at = now() where id = trade.id;
+        insert into public.notifications (user_id, league_id, kind, title, body)
+        values (trade.proposer_id, trade.league_id, 'trade_declined', 'Trade declined', 'Your trade offer was declined.');
+        return;
+    end if;
+
+    if response <> 'accept' then
+        raise exception 'Unsupported trade response';
+    end if;
+
+    select * into offered_roster
+    from public.rosters
+    where league_id = trade.league_id
+    and user_id = trade.proposer_id
+    and artist_id = trade.offered_artist_id
+    and released_at is null
+    for update;
+
+    select * into requested_roster
+    from public.rosters
+    where league_id = trade.league_id
+    and user_id = trade.recipient_id
+    and artist_id = trade.requested_artist_id
+    and released_at is null
+    for update;
+
+    if offered_roster.id is null or requested_roster.id is null then
+        update public.trade_offers set status = 'expired', responded_at = now() where id = trade.id;
+        raise exception 'One of these artists is no longer available for this trade';
+    end if;
+    if not public.artist_fits_roster_slot(trade.requested_artist_id, offered_roster.roster_slot) or
+       not public.artist_fits_roster_slot(trade.offered_artist_id, requested_roster.roster_slot) then
+        update public.trade_offers set status = 'expired', responded_at = now() where id = trade.id;
+        raise exception 'This trade no longer fits both rosters';
+    end if;
+
+    update public.rosters
+    set user_id = trade.recipient_id,
+        roster_slot = requested_roster.roster_slot,
+        acquired_at = now()
+    where id = offered_roster.id;
+
+    update public.rosters
+    set user_id = trade.proposer_id,
+        roster_slot = offered_roster.roster_slot,
+        acquired_at = now()
+    where id = requested_roster.id;
+
+    update public.trade_offers set status = 'accepted', responded_at = now() where id = trade.id;
+
+    insert into public.notifications (user_id, league_id, kind, title, body)
+    values
+        (trade.proposer_id, trade.league_id, 'trade_accepted', 'Trade accepted', 'Your trade offer was accepted.'),
+        (trade.recipient_id, trade.league_id, 'trade_accepted', 'Trade accepted', 'The trade has been added to your roster.');
+end;
+$$;
+
+grant execute on function public.respond_trade_offer(uuid, text) to authenticated;
+
+drop function if exists public.league_trade_offers(uuid);
+create or replace function public.league_trade_offers(target_league_id uuid)
+returns table (
+    id uuid,
+    proposer_username text,
+    recipient_username text,
+    offered_artist_name text,
+    requested_artist_name text,
+    offered_image_url text,
+    requested_image_url text,
+    offered_roster_slot text,
+    requested_roster_slot text,
+    status text,
+    created_at timestamptz,
+    expires_at timestamptz,
+    is_incoming boolean,
+    is_outgoing boolean
+)
+language sql
+security definer
+set search_path = public
+as $$
+    select
+        trade_offers.id,
+        proposer.username as proposer_username,
+        recipient.username as recipient_username,
+        coalesce(offered_artist.display_name, offered_artist.normalized_name) as offered_artist_name,
+        coalesce(requested_artist.display_name, requested_artist.normalized_name) as requested_artist_name,
+        offered_artist.image_url as offered_image_url,
+        requested_artist.image_url as requested_image_url,
+        trade_offers.offered_roster_slot,
+        trade_offers.requested_roster_slot,
+        case
+            when trade_offers.status = 'pending' and trade_offers.expires_at <= now() then 'expired'
+            else trade_offers.status
+        end as status,
+        trade_offers.created_at,
+        trade_offers.expires_at,
+        trade_offers.recipient_id = auth.uid() as is_incoming,
+        trade_offers.proposer_id = auth.uid() as is_outgoing
+    from public.trade_offers
+    join public.profiles proposer on proposer.id = trade_offers.proposer_id
+    join public.profiles recipient on recipient.id = trade_offers.recipient_id
+    join public.artists offered_artist on offered_artist.id = trade_offers.offered_artist_id
+    join public.artists requested_artist on requested_artist.id = trade_offers.requested_artist_id
+    where trade_offers.league_id = target_league_id
+    and exists (
+        select 1 from public.league_members viewer
+        where viewer.league_id = target_league_id
+        and viewer.user_id = auth.uid()
+        and viewer.status = 'active'
+    )
+    order by trade_offers.created_at desc;
+$$;
+
+grant execute on function public.league_trade_offers(uuid) to authenticated;
+
 create or replace function public.upsert_profile(requested_email text, requested_username text, requested_display_name text, requested_mailing_list boolean)
 returns void
 language plpgsql
@@ -1758,3 +2104,5 @@ create index if not exists league_setting_votes_league_idx on public.league_sett
 create index if not exists league_moderation_actions_league_idx on public.league_moderation_actions(league_id);
 create index if not exists draft_picks_league_idx on public.draft_picks(league_id, pick_number);
 create index if not exists notifications_user_idx on public.notifications(user_id, read_at);
+create index if not exists trade_offers_league_idx on public.trade_offers(league_id, status, expires_at);
+create index if not exists trade_offers_recipient_idx on public.trade_offers(recipient_id, status);

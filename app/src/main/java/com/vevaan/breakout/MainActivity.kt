@@ -259,6 +259,7 @@ internal enum class BreakoutTab(val title: String, val mark: String) {
     DraftSummary("Draft Summary", "DS"),
     Standings("Standings", "S"),
     League("League", "L"),
+    Trades("Trades", "TR"),
     Account("Account", "A")
 }
 
@@ -499,6 +500,21 @@ internal data class WaiverClaimUi(
     val artist: ArtistUi,
     val slot: RosterSlot,
     val dropSlot: RosterSlot? = null
+)
+
+internal data class TradeOfferUi(
+    val id: String,
+    val proposerUsername: String,
+    val recipientUsername: String,
+    val offeredArtist: ArtistUi,
+    val requestedArtist: ArtistUi,
+    val offeredSlot: RosterSlot,
+    val requestedSlot: RosterSlot,
+    val status: String,
+    val createdAt: String,
+    val expiresAt: String,
+    val incoming: Boolean,
+    val outgoing: Boolean
 )
 
 internal data class ArtistUi(
@@ -2299,6 +2315,88 @@ internal object SupabaseLeagueService {
         )
     }
 
+    suspend fun loadTradeOffers(accessToken: String, leagueId: String): Result<List<TradeOfferUi>> = runCatching {
+        if (accessToken.isBlank() || leagueId.isBlank() || !isOnlinePlayConfigured()) return@runCatching emptyList()
+        val raw = requestText(
+            url = "$baseUrl/rest/v1/rpc/league_trade_offers",
+            method = "POST",
+            accessToken = accessToken,
+            body = JSONObject().put("target_league_id", leagueId).toString()
+        )
+        val array = JSONArray(raw)
+        List(array.length()) { index ->
+            val item = array.getJSONObject(index)
+            val offeredName = item.optString("offered_artist_name", "Offered artist")
+            val requestedName = item.optString("requested_artist_name", "Requested artist")
+            val offeredSlot = RosterSlot.entries.firstOrNull { it.name == item.optString("offered_roster_slot") } ?: RosterSlot.BenchOne
+            val requestedSlot = RosterSlot.entries.firstOrNull { it.name == item.optString("requested_roster_slot") } ?: RosterSlot.BenchOne
+            TradeOfferUi(
+                id = item.optString("id"),
+                proposerUsername = item.optString("proposer_username", "Member"),
+                recipientUsername = item.optString("recipient_username", "Member"),
+                offeredArtist = ArtistUi(
+                    id = null,
+                    name = offeredName,
+                    listeners = null,
+                    albumCount = null,
+                    imageUrl = item.optString("offered_image_url").ifBlank { null },
+                    source = "Trade",
+                    scoreStatus = "Trade offer"
+                ),
+                requestedArtist = ArtistUi(
+                    id = null,
+                    name = requestedName,
+                    listeners = null,
+                    albumCount = null,
+                    imageUrl = item.optString("requested_image_url").ifBlank { null },
+                    source = "Trade",
+                    scoreStatus = "Trade offer"
+                ),
+                offeredSlot = offeredSlot,
+                requestedSlot = requestedSlot,
+                status = item.optString("status", "pending"),
+                createdAt = item.optString("created_at"),
+                expiresAt = item.optString("expires_at"),
+                incoming = item.optBoolean("is_incoming", false),
+                outgoing = item.optBoolean("is_outgoing", false)
+            )
+        }
+    }
+
+    suspend fun createTradeOffer(
+        accessToken: String,
+        leagueId: String,
+        targetUsername: String,
+        offeredArtistName: String,
+        requestedArtistName: String
+    ): Result<String> = runCatching {
+        if (accessToken.isBlank() || leagueId.isBlank() || !isOnlinePlayConfigured()) error("Sign in again to send trades.")
+        requestText(
+            url = "$baseUrl/rest/v1/rpc/create_trade_offer",
+            method = "POST",
+            accessToken = accessToken,
+            body = JSONObject()
+                .put("target_league_id", leagueId)
+                .put("target_username", targetUsername)
+                .put("offered_artist_name", offeredArtistName)
+                .put("requested_artist_name", requestedArtistName)
+                .toString()
+        ).trim('"')
+    }
+
+    suspend fun respondTradeOffer(accessToken: String, tradeId: String, response: String): Result<Unit> = runCatching {
+        if (accessToken.isBlank() || tradeId.isBlank() || !isOnlinePlayConfigured()) error("Sign in again to respond to trades.")
+        requestText(
+            url = "$baseUrl/rest/v1/rpc/respond_trade_offer",
+            method = "POST",
+            accessToken = accessToken,
+            body = JSONObject()
+                .put("target_trade_id", tradeId)
+                .put("response", response)
+                .toString()
+        )
+    }
+
     suspend fun loadMembers(accessToken: String, leagueId: String): Result<List<LeagueMemberUi>> = runCatching {
         if (accessToken.isBlank() || leagueId.isBlank() || !isOnlinePlayConfigured()) return@runCatching emptyList()
         val raw = requestText(
@@ -2941,6 +3039,8 @@ internal fun BreakoutApp(
     var refreshingLeagueData by remember { mutableStateOf(false) }
     var leagueMembersById by remember { mutableStateOf<Map<String, List<LeagueMemberUi>>>(emptyMap()) }
     var draftPicksByLeagueId by remember { mutableStateOf<Map<String, List<DraftPickUi>>>(emptyMap()) }
+    var tradeOffersByLeagueId by remember { mutableStateOf<Map<String, List<TradeOfferUi>>>(emptyMap()) }
+    var notifiedTradeOfferIds by rememberSaveable { mutableStateOf(setOf<String>()) }
     var draftPresenceByLeagueId by remember { mutableStateOf<Map<String, DraftPresenceUi>>(emptyMap()) }
     var droppedArtistsByLeagueId by remember { mutableStateOf<Map<String, Set<String>>>(emptyMap()) }
     var droppedArtistDatesByLeagueId by remember { mutableStateOf<Map<String, Map<String, Long>>>(emptyMap()) }
@@ -3040,6 +3140,7 @@ internal fun BreakoutApp(
             previousActive?.id?.takeIf { it.isNotBlank() }?.let { removedId ->
                 leagueMembersById = leagueMembersById - removedId
                 draftPicksByLeagueId = draftPicksByLeagueId - removedId
+                tradeOffersByLeagueId = tradeOffersByLeagueId - removedId
                 draftPresenceByLeagueId = draftPresenceByLeagueId - removedId
                 droppedArtistsByLeagueId = droppedArtistsByLeagueId - removedId
                 droppedArtistDatesByLeagueId = droppedArtistDatesByLeagueId - removedId
@@ -3525,6 +3626,23 @@ internal fun BreakoutApp(
                         SupabaseLeagueService.loadDraftPicks(current.accessToken, leagueId).onSuccess { picks ->
                             draftPicksByLeagueId = draftPicksByLeagueId + (leagueId to picks)
                         }
+                        SupabaseLeagueService.loadTradeOffers(current.accessToken, leagueId).onSuccess { offers ->
+                            val newIncoming = offers.filter { offer ->
+                                offer.incoming && offer.status == "pending" && offer.id !in notifiedTradeOfferIds
+                            }
+                            if (newIncoming.isNotEmpty()) {
+                                notifiedTradeOfferIds = notifiedTradeOfferIds + newIncoming.map { it.id }
+                                newIncoming.firstOrNull()?.let { offer ->
+                                    showDraftSystemNotification(
+                                        context = context,
+                                        title = "New trade offer",
+                                        message = "${offer.proposerUsername} offered ${offer.offeredArtist.name} for ${offer.requestedArtist.name}.",
+                                        notificationId = offer.id.hashCode()
+                                    )
+                                }
+                            }
+                            tradeOffersByLeagueId = tradeOffersByLeagueId + (leagueId to offers)
+                        }
                         if (league?.draftStatus == DraftStatus.Lobby) {
                             SupabaseLeagueService.loadDraftPresence(current.accessToken, leagueId).onSuccess { presence ->
                                 draftPresenceByLeagueId = draftPresenceByLeagueId + (leagueId to presence)
@@ -3654,6 +3772,31 @@ internal fun BreakoutApp(
         }
     }
 
+    fun loadTradesForLeague(target: LeagueUi, force: Boolean = false) {
+        if (!isOnlinePlayConfigured() || target.id.isBlank()) return
+        if (!force && tradeOffersByLeagueId.containsKey(target.id)) return
+        scope.launch {
+            val current = currentOnlineAccount() ?: return@launch
+            SupabaseLeagueService.loadTradeOffers(current.accessToken, target.id).onSuccess { offers ->
+                val newIncoming = offers.filter { offer ->
+                    offer.incoming && offer.status == "pending" && offer.id !in notifiedTradeOfferIds
+                }
+                if (newIncoming.isNotEmpty()) {
+                    notifiedTradeOfferIds = notifiedTradeOfferIds + newIncoming.map { it.id }
+                    newIncoming.firstOrNull()?.let { offer ->
+                        showDraftSystemNotification(
+                            context = context,
+                            title = "New trade offer",
+                            message = "${offer.proposerUsername} offered ${offer.offeredArtist.name} for ${offer.requestedArtist.name}.",
+                            notificationId = offer.id.hashCode()
+                        )
+                    }
+                }
+                tradeOffersByLeagueId = tradeOffersByLeagueId + (target.id to offers)
+            }
+        }
+    }
+
     fun kickMember(targetUsername: String) {
         val active = league ?: return
         val token = account?.accessToken.orEmpty()
@@ -3676,6 +3819,9 @@ internal fun BreakoutApp(
     LaunchedEffect(selectedTab, league?.id) {
         if (selectedTab == BreakoutTab.Matchup || selectedTab == BreakoutTab.Draft) {
             league?.let { loadMembersForLeague(it, force = true) }
+        }
+        if (selectedTab == BreakoutTab.Trades) {
+            league?.let { loadTradesForLeague(it, force = true) }
         }
     }
 
@@ -3729,6 +3875,9 @@ internal fun BreakoutApp(
             SupabaseLeagueService.loadDraftPicks(current.accessToken, activeAfterLoad.id).onSuccess { picks ->
                 draftPicksByLeagueId = draftPicksByLeagueId + (activeAfterLoad.id to picks)
             }
+            SupabaseLeagueService.loadTradeOffers(current.accessToken, activeAfterLoad.id).onSuccess { offers ->
+                tradeOffersByLeagueId = tradeOffersByLeagueId + (activeAfterLoad.id to offers)
+            }
         }
 
         startupStep(1f, "Opening your league")
@@ -3759,7 +3908,7 @@ internal fun BreakoutApp(
                 delay(
                     when {
                         league?.draftStatus == DraftStatus.Live -> 1_000
-                        selectedTab == BreakoutTab.League -> 3_000
+                        selectedTab == BreakoutTab.League || selectedTab == BreakoutTab.Trades -> 3_000
                         else -> 10_000
                     }
                 )
@@ -3780,6 +3929,23 @@ internal fun BreakoutApp(
                     }
                     SupabaseLeagueService.loadDraftPicks(current.accessToken, leagueId).onSuccess { picks ->
                         draftPicksByLeagueId = draftPicksByLeagueId + (leagueId to picks)
+                    }
+                    SupabaseLeagueService.loadTradeOffers(current.accessToken, leagueId).onSuccess { offers ->
+                        val newIncoming = offers.filter { offer ->
+                            offer.incoming && offer.status == "pending" && offer.id !in notifiedTradeOfferIds
+                        }
+                        if (newIncoming.isNotEmpty()) {
+                            notifiedTradeOfferIds = notifiedTradeOfferIds + newIncoming.map { it.id }
+                            newIncoming.firstOrNull()?.let { offer ->
+                                showDraftSystemNotification(
+                                    context = context,
+                                    title = "New trade offer",
+                                    message = "${offer.proposerUsername} offered ${offer.offeredArtist.name} for ${offer.requestedArtist.name}.",
+                                    notificationId = offer.id.hashCode()
+                                )
+                            }
+                        }
+                        tradeOffersByLeagueId = tradeOffersByLeagueId + (leagueId to offers)
                     }
                 }
             }
@@ -4357,6 +4523,108 @@ internal fun BreakoutApp(
                             },
                             onLeaveLeague = { leaveLeague(activeLeague) },
                             onDeleteLeague = { deleteLeague(activeLeague) }
+                        )
+                        BreakoutTab.Trades -> TradeScreen(
+                            league = activeLeague,
+                            account = account,
+                            roster = visibleRoster,
+                            draftPicks = draftPicksByLeagueId[activeLeague.id].orEmpty(),
+                            members = leagueMembersById[activeLeague.id],
+                            tradeOffers = tradeOffersByLeagueId[activeLeague.id].orEmpty(),
+                            refreshing = refreshingLeagueData,
+                            onRefresh = {
+                                refreshRemoteLeagues()
+                                loadTradesForLeague(activeLeague, force = true)
+                            },
+                            onOpenMenu = { scope.launch { drawerState.open() } },
+                            onSendTrade = { member, _, offeredArtist, _, requestedArtist ->
+                                scope.launch {
+                                    val current = currentOnlineAccount()?.takeIf { it.accessToken.isNotBlank() }
+                                    if (current == null) {
+                                        Toast.makeText(context, "Sign in again to send trades.", Toast.LENGTH_SHORT).show()
+                                        return@launch
+                                    }
+                                    SupabaseLeagueService.createTradeOffer(
+                                        accessToken = current.accessToken,
+                                        leagueId = activeLeague.id,
+                                        targetUsername = member.username,
+                                        offeredArtistName = offeredArtist.name,
+                                        requestedArtistName = requestedArtist.name
+                                    ).onSuccess {
+                                        showDraftSystemNotification(
+                                            context = context,
+                                            title = "Trade sent",
+                                            message = "You offered ${offeredArtist.name} for ${requestedArtist.name}.",
+                                            notificationId = it.hashCode()
+                                        )
+                                        loadTradesForLeague(activeLeague, force = true)
+                                    }.onFailure { error ->
+                                        Toast.makeText(context, friendlyTradeError(error.message), Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            },
+                            onAcceptTrade = { offer ->
+                                scope.launch {
+                                    val current = currentOnlineAccount()?.takeIf { it.accessToken.isNotBlank() }
+                                    if (current == null) {
+                                        Toast.makeText(context, "Sign in again to accept trades.", Toast.LENGTH_SHORT).show()
+                                        return@launch
+                                    }
+                                    SupabaseLeagueService.respondTradeOffer(current.accessToken, offer.id, "accept")
+                                        .onSuccess {
+                                            showDraftSystemNotification(
+                                                context = context,
+                                                title = "Trade accepted",
+                                                message = "Your roster now includes ${offer.offeredArtist.name}.",
+                                                notificationId = offer.id.hashCode() + 11
+                                            )
+                                            refreshRemoteLeagues()
+                                            loadTradesForLeague(activeLeague, force = true)
+                                        }
+                                        .onFailure { error ->
+                                            Toast.makeText(context, friendlyTradeError(error.message), Toast.LENGTH_LONG).show()
+                                        }
+                                }
+                            },
+                            onDeclineTrade = { offer ->
+                                scope.launch {
+                                    val current = currentOnlineAccount()?.takeIf { it.accessToken.isNotBlank() }
+                                    if (current == null) return@launch
+                                    SupabaseLeagueService.respondTradeOffer(current.accessToken, offer.id, "decline")
+                                        .onSuccess {
+                                            showDraftSystemNotification(
+                                                context = context,
+                                                title = "Trade declined",
+                                                message = "You declined ${offer.proposerUsername}'s offer.",
+                                                notificationId = offer.id.hashCode() + 12
+                                            )
+                                            loadTradesForLeague(activeLeague, force = true)
+                                        }
+                                        .onFailure { error ->
+                                            Toast.makeText(context, friendlyTradeError(error.message), Toast.LENGTH_LONG).show()
+                                        }
+                                }
+                            },
+                            onCancelTrade = { offer ->
+                                scope.launch {
+                                    val current = currentOnlineAccount()?.takeIf { it.accessToken.isNotBlank() }
+                                    if (current == null) return@launch
+                                    SupabaseLeagueService.respondTradeOffer(current.accessToken, offer.id, "cancel")
+                                        .onSuccess {
+                                            showDraftSystemNotification(
+                                                context = context,
+                                                title = "Trade canceled",
+                                                message = "Your trade offer was canceled.",
+                                                notificationId = offer.id.hashCode() + 13
+                                            )
+                                            loadTradesForLeague(activeLeague, force = true)
+                                        }
+                                        .onFailure { error ->
+                                            Toast.makeText(context, friendlyTradeError(error.message), Toast.LENGTH_LONG).show()
+                                        }
+                                }
+                            },
+                            onArtistSelected = { selectedArtist = it }
                         )
                         BreakoutTab.Account -> AccountScreen(
                             account = account,
