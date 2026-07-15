@@ -512,15 +512,16 @@ set search_path = public
 as $$
 declare
     target_user_id uuid;
+    current_manager_id uuid := auth.uid();
 begin
-    if auth.uid() is null then
+    if current_manager_id is null then
         raise exception 'Authentication required';
     end if;
 
     if not exists (
         select 1 from public.league_members
         where league_id = target_league_id
-        and user_id = auth.uid()
+        and user_id = current_manager_id
         and role = 'manager'
         and status = 'active'
     ) then
@@ -542,16 +543,28 @@ begin
     update public.league_members
     set role = 'member'
     where league_id = target_league_id
+    and status = 'active'
     and role = 'manager';
 
     update public.league_members
     set role = 'manager'
     where league_id = target_league_id
-    and user_id = target_user_id;
+    and user_id = target_user_id
+    and status = 'active';
 
     update public.leagues
     set owner_id = target_user_id
     where id = target_league_id;
+
+    if not exists (
+        select 1 from public.league_members
+        where league_id = target_league_id
+        and user_id = target_user_id
+        and role = 'manager'
+        and status = 'active'
+    ) then
+        raise exception 'Manager transfer did not complete';
+    end if;
 end;
 $$;
 
