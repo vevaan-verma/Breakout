@@ -253,7 +253,7 @@ internal fun ScreenColumn(
                 end = BreakoutDimensions.ScreenHorizontalPadding,
                 bottom = BreakoutDimensions.SectionSpacing + BreakoutDimensions.MinimumTouchTarget
             ),
-            verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.CardSpacing)
+            verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.xxs)
         ) {
             if (stickyTopBar != null) {
                 stickyHeader {
@@ -264,7 +264,7 @@ internal fun ScreenColumn(
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(bottom = BreakoutDimensions.xs)
+                                .padding(bottom = BreakoutDimensions.xxs)
                         ) {
                             stickyTopBar()
                         }
@@ -322,6 +322,7 @@ internal fun AppStartupLoadingScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
             .statusBarsPadding()
             .padding(BreakoutDimensions.ScreenHorizontalPadding),
         contentAlignment = Alignment.Center
@@ -514,7 +515,7 @@ internal fun SignInScreen(
         AuthMode.CreateAccount -> emailError == null &&
             passwordError == null &&
             cleanedEmail.contains("@") &&
-            cleanedUsername.length >= 3 &&
+            cleanedUsername.length >= MinUsernameLength &&
             password == confirmPassword &&
             signupCooldownSeconds == 0L
     }
@@ -691,7 +692,7 @@ internal fun SignInScreen(
                     AnimatedFeedbackText(message = "Passwords do not match.", color = BreakoutCoral)
                 }
                 if (username.isNotBlank() && !isValidUsername(username)) {
-                    AnimatedFeedbackText(message = "Username must be 3-24 letters, numbers, or underscores.", color = BreakoutCoral)
+                    AnimatedFeedbackText(message = usernameValidationMessage(username), color = BreakoutCoral)
                 }
                 passwordError?.let {
                     AnimatedFeedbackText(message = it, color = BreakoutCoral)

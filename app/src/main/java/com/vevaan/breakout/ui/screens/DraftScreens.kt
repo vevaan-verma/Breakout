@@ -1044,7 +1044,14 @@ internal fun DraftPickSummaryRow(
         ArtistArtwork(artist = artist, size = BreakoutDimensions.ArtworkList)
         Column(modifier = Modifier.weight(1f)) {
             Text(artist.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("Round $round, Pick $pick - $pickedBy", color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                "Round $round, Pick $pick - $pickedBy",
+                color = if (pickedBy == "You") WaiverAccent else BreakoutTextSecondary,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (pickedBy == "You") FontWeight.Bold else FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
         Text(artist.tag, style = MaterialTheme.typography.labelLarge)
     }

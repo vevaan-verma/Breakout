@@ -381,7 +381,9 @@ internal fun MarketScreen(
             onVisibleCountChange(20)
             onOpenActionArtistKeyChange(null)
             delay(120)
-            listState.scrollToItem(0)
+            if (lastMarketKey != filterKey) {
+                listState.scrollToItem(0)
+            }
             val firstRows = allFilteredArtists.take(20)
             prefetchArtistImages(context, firstRows)
             visibleArtistRows = firstRows
@@ -483,7 +485,7 @@ internal fun MarketScreen(
             marketContentVisible = false
         } else {
             marketContentVisible = false
-            delay(40)
+            delay(1_000)
             marketContentVisible = true
         }
     }
@@ -533,8 +535,8 @@ internal fun MarketScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             // Market header spacing: controls the gap under the title and above search/filter.
-                            .padding(vertical = BreakoutDimensions.sm),
-                        verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
+                            .padding(vertical = BreakoutDimensions.xxs),
+                        verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.xxs)
                     ) {
                         TopTitle(
                             title = if (draftPickMode) "Draft Market" else "Market",
@@ -558,8 +560,9 @@ internal fun MarketScreen(
                             )
                             AnimatedVisibility(
                                 visible = query.isNotBlank(),
-                                enter = fadeIn() + expandVertically(),
-                                exit = fadeOut() + shrinkVertically()
+                                modifier = Modifier.align(Alignment.CenterVertically),
+                                enter = fadeIn(),
+                                exit = fadeOut()
                             ) {
                                 Box(
                                     modifier = Modifier
@@ -705,7 +708,7 @@ internal fun MarketScreen(
             modifier = Modifier.fillMaxSize(),
             visible = initialMarketLoading,
             enter = fadeIn(),
-            exit = fadeOut()
+            exit = slideOutVertically(animationSpec = tween(260)) { -it / 18 }
         ) {
             MarketInitializingScreen(onOpenMenu = onOpenMenu)
         }

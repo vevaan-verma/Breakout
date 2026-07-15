@@ -190,6 +190,7 @@ import kotlin.random.Random
 internal fun RosterScreen(
     roster: Map<RosterSlot, ArtistUi>,
     waiverClaims: List<WaiverClaimUi>,
+    waiverResults: List<WaiverResultUi> = emptyList(),
     leagueSettings: LeagueSettingsUi,
     memberCount: Int,
     draftStatus: DraftStatus,
@@ -269,11 +270,15 @@ internal fun RosterScreen(
                 }
                 if (waiverClaims.isEmpty()) {
                     Text("Queue claims from artist pages when you have a matching open slot.", color = BreakoutTextSecondary)
+                    waiverResults.forEach { result ->
+                        WaiverResultRow(result)
+                    }
                 } else {
+                    val waiverListHeight = waiverClaims.size * 167
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height((waiverClaims.size * 170).dp),
+                            .height(waiverListHeight.dp),
                         userScrollEnabled = false,
                         verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
                     ) {
@@ -554,10 +559,12 @@ internal fun WaiverClaimRow(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = "Pending waiver",
+                        text = claim.dropArtistName?.let { "Pending waiver • Drops $it" } ?: "Pending waiver",
                         color = WaiverAccent,
                         style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
@@ -636,5 +643,32 @@ internal fun WaiverOrderRow(rank: Int, team: String) {
     ) {
         Text("#$rank", color = if (rank == 1) WaiverAccent else BreakoutSecondary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         Text(team, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+internal fun WaiverResultRow(result: WaiverResultUi) {
+    val accent = when (result.status) {
+        "Processed" -> WaiverAccent
+        "Rejected" -> BreakoutCoral
+        else -> BreakoutTextSecondary
+    }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = accent.copy(alpha = 0.10f),
+        shape = RoundedCornerShape(BreakoutDimensions.SmallCornerRadius),
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.30f))
+    ) {
+        Row(
+            modifier = Modifier.padding(BreakoutDimensions.md),
+            horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(result.status, color = accent, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Black)
+            Column(modifier = Modifier.weight(1f)) {
+                Text(result.artistName, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(result.detail, color = BreakoutTextSecondary, style = MaterialTheme.typography.bodySmall)
+            }
+        }
     }
 }

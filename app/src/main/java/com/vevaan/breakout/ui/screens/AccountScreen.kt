@@ -244,7 +244,7 @@ internal fun AccountScreen(
                 maxLength = MaxUsernameLength
             )
             if (username.isNotBlank() && !isValidUsername(username.trim())) {
-                AnimatedFeedbackText(message = "Username must be 3-24 letters, numbers, or underscores.", color = BreakoutCoral)
+                AnimatedFeedbackText(message = usernameValidationMessage(username.trim()), color = BreakoutCoral)
             }
             ToggleRow(
                 label = "Mailing List",
@@ -873,7 +873,12 @@ internal fun ArtistHistoryTimelineCard(
                 }
                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.xs)) {
                     Text(event.first, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    Text(event.second, color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        event.second,
+                        color = if (event.second.startsWith("You")) WaiverAccent else BreakoutTextSecondary,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = if (event.second.startsWith("You")) FontWeight.Bold else FontWeight.Normal
+                    )
                 }
             }
         }

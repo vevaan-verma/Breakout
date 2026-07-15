@@ -347,6 +347,7 @@ internal data class AuthCallbackUi(
 )
 
 internal const val MaxEmailLength = 254
+internal const val MinUsernameLength = 4
 internal const val MaxUsernameLength = 24
 internal const val MinPasswordLength = 8
 internal const val MaxPasswordLength = 72
@@ -500,7 +501,14 @@ internal data class MatchupWeekUi(
 internal data class WaiverClaimUi(
     val artist: ArtistUi,
     val slot: RosterSlot,
-    val dropSlot: RosterSlot? = null
+    val dropSlot: RosterSlot? = null,
+    val dropArtistName: String? = null
+)
+
+internal data class WaiverResultUi(
+    val artistName: String,
+    val status: String,
+    val detail: String
 )
 
 internal data class TradeOfferUi(
@@ -1881,7 +1889,7 @@ internal object SupabaseLeagueService {
         runCatching {
             if (!isOnlinePlayConfigured()) error("Online accounts are not configured.")
             emailQualityError(email)?.let { error(it) }
-            if (!isValidUsername(username)) error("Username must be 3-24 letters, numbers, or underscores.")
+            if (!isValidUsername(username)) error(usernameValidationMessage(username))
             passwordPolicyError(password)?.let { error(it) }
             if (!isEmailAvailable(email)) error("That email already has an account. Use Log In instead.")
             if (!isUsernameAvailable(username)) error("That username is already taken.")
@@ -1892,7 +1900,7 @@ internal object SupabaseLeagueService {
 
     suspend fun updateProfile(account: AccountUi): Result<AccountUi> = runCatching {
         if (account.accessToken.isBlank() || !isOnlinePlayConfigured()) error("Sign in again to continue.")
-        if (!isValidUsername(account.username)) error("Username must be 3-24 letters, numbers, or underscores.")
+        if (!isValidUsername(account.username)) error(usernameValidationMessage(account.username))
         if (!isUsernameAvailableForAccount(account.username, account.userId)) error("That username is already taken.")
         upsertProfile(account.accessToken, account.email, account.username, account.mailingList)
         account.copy(displayName = account.username)
@@ -2831,8 +2839,9 @@ internal object LocalBreakoutStore {
             List(array.length()) { index -> array.getJSONObject(index) }.mapNotNull { item ->
                 val slot = RosterSlot.entries.firstOrNull { it.name == item.optString("slot") } ?: return@mapNotNull null
                 val dropSlot = RosterSlot.entries.firstOrNull { it.name == item.optString("dropSlot") }
+                val dropArtistName = item.optString("dropArtistName").ifBlank { null }
                 val artist = item.toStoredArtist()
-                WaiverClaimUi(artist, slot, dropSlot)
+                WaiverClaimUi(artist, slot, dropSlot, dropArtistName)
             }
         }.getOrDefault(emptyList())
     }
@@ -2843,6 +2852,7 @@ internal object LocalBreakoutStore {
             array.put(JSONObject().apply {
                 put("slot", claim.slot.name)
                 claim.dropSlot?.let { put("dropSlot", it.name) }
+                claim.dropArtistName?.let { put("dropArtistName", it) }
                 putStoredArtist(claim.artist)
             })
         }
@@ -3080,6 +3090,7 @@ internal fun BreakoutApp(
     var marketLastKey by rememberSaveable { mutableStateOf<String?>(null) }
     var marketLoadedKey by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedArtist by remember { mutableStateOf<ArtistUi?>(null) }
+    var detailArtistForAnimation by remember { mutableStateOf<ArtistUi?>(null) }
     var selectedArtistReadOnly by remember { mutableStateOf(false) }
     var roster by remember { mutableStateOf<Map<RosterSlot, ArtistUi>>(emptyMap()) }
     var draftLeagueName by rememberSaveable { mutableStateOf("") }
@@ -3090,6 +3101,7 @@ internal fun BreakoutApp(
     var draftRoomLeagueId by rememberSaveable { mutableStateOf<String?>(null) }
     var passwordResetOpen by rememberSaveable { mutableStateOf(false) }
     var waiverClaims by remember { mutableStateOf<List<WaiverClaimUi>>(emptyList()) }
+    var waiverResultsByLeagueId by remember { mutableStateOf<Map<String, List<WaiverResultUi>>>(emptyMap()) }
     var authGate by remember { mutableStateOf(if (isOnlinePlayConfigured()) AuthGate.Checking else AuthGate.SignedIn) }
     var refreshingLeagueData by remember { mutableStateOf(false) }
     var leagueMembersById by remember { mutableStateOf<Map<String, List<LeagueMemberUi>>>(emptyMap()) }
@@ -3106,6 +3118,7 @@ internal fun BreakoutApp(
     var startupProgress by remember { mutableStateOf(0f) }
     var startupMessage by remember { mutableStateOf("Opening Breakout") }
     var leagueSwitchLoading by remember { mutableStateOf(false) }
+    var leagueSwitchProgress by remember { mutableStateOf(0f) }
     var leagueSwitchMessage by remember { mutableStateOf("Loading league") }
     var pendingDraftExitTab by remember { mutableStateOf<BreakoutTab?>(null) }
     var navigationRefreshTick by remember { mutableStateOf(0) }
@@ -3636,6 +3649,10 @@ internal fun BreakoutApp(
         navigationRefreshTick++
     }
 
+    LaunchedEffect(selectedArtist) {
+        selectedArtist?.let { detailArtistForAnimation = it }
+    }
+
     fun openMarketForFilter(filter: MarketFilter, draftMode: Boolean = false) {
         draftPickMode = draftMode
         marketQuery = ""
@@ -3952,7 +3969,7 @@ internal fun BreakoutApp(
         }
 
         startupStep(1f, "Opening your league")
-        delay(260)
+        delay(1_100)
         startupLoading = false
     }
 
@@ -4199,18 +4216,21 @@ internal fun BreakoutApp(
                 onSwitchLeague = { selected ->
                     closeDraftRoomWithAutoPick()
                     scope.launch {
-                        drawerState.close()
                         leagueSwitchMessage = "Loading ${selected.name}"
+                        leagueSwitchProgress = 0.08f
                         leagueSwitchLoading = true
                         activeLeagueCode = selected.inviteCode
                         joinError = null
                         selectedTab = BreakoutTab.Home
+                        delay(120)
+                        leagueSwitchProgress = 0.28f
                         val leagueKey = selected.id.ifBlank { selected.inviteCode }
                         roster = LocalBreakoutStore.loadRoster(context, leagueKey)
                         waiverClaims = LocalBreakoutStore.loadWaiverClaims(context, leagueKey)
                         droppedArtistsByLeagueId = droppedArtistsByLeagueId + (leagueKey to LocalBreakoutStore.loadDroppedArtists(context, leagueKey))
                         droppedArtistDatesByLeagueId = droppedArtistDatesByLeagueId + (leagueKey to LocalBreakoutStore.loadDroppedArtistDates(context, leagueKey))
                         waiveredArtistDatesByLeagueId = waiveredArtistDatesByLeagueId + (leagueKey to LocalBreakoutStore.loadWaiveredArtistDates(context, leagueKey))
+                        leagueSwitchProgress = 0.54f
                         val current = currentOnlineAccount()?.takeIf { it.accessToken.isNotBlank() }
                         if (current != null && selected.id.isNotBlank()) {
                             SupabaseLeagueService.loadMembers(current.accessToken, selected.id).onSuccess { loadedMembers ->
@@ -4224,9 +4244,13 @@ internal fun BreakoutApp(
                                 tradeOffersByLeagueId = tradeOffersByLeagueId + (selected.id to offers)
                             }
                         }
+                        leagueSwitchProgress = 0.78f
                         prefetchArtistImages(context, roster.values.toList(), limit = 80)
                         navigationRefreshTick++
-                        delay(220)
+                        leagueSwitchProgress = 1f
+                        delay(1_100)
+                        drawerState.close()
+                        delay(180)
                         leagueSwitchLoading = false
                     }
                 },
@@ -4261,11 +4285,7 @@ internal fun BreakoutApp(
                     .padding(innerPadding)
             ) {
                 val activeLeague = league
-                if (startupLoading) {
-                    AppStartupLoadingScreen(progress = startupProgress, message = startupMessage)
-                } else if (leagueSwitchLoading) {
-                    AppStartupLoadingScreen(progress = 0.82f, message = leagueSwitchMessage)
-                } else if (requiresOnlineAccount && authGate == AuthGate.Checking) {
+                if (requiresOnlineAccount && authGate == AuthGate.Checking) {
                     AuthCheckingScreen()
                 } else if (requiresOnlineAccount && !hasUsableAccount) {
                     SignInScreen(
@@ -4313,8 +4333,11 @@ internal fun BreakoutApp(
                     AnimatedContent(
                         targetState = selectedTab,
                         transitionSpec = {
-                            (fadeIn(animationSpec = tween(260)) + slideInHorizontally(animationSpec = tween(260)) { it / 10 }) togetherWith
-                                (fadeOut(animationSpec = tween(180)) + slideOutHorizontally(animationSpec = tween(180)) { -it / 12 })
+                            val forward = targetState.ordinal >= initialState.ordinal
+                            val enterOffset: (Int) -> Int = { width -> if (forward) width / 8 else -width / 8 }
+                            val exitOffset: (Int) -> Int = { width -> if (forward) -width / 10 else width / 10 }
+                            (fadeIn(animationSpec = tween(260)) + slideInHorizontally(animationSpec = tween(260), initialOffsetX = enterOffset)) togetherWith
+                                (fadeOut(animationSpec = tween(190)) + slideOutHorizontally(animationSpec = tween(190), targetOffsetX = exitOffset))
                         },
                         label = "breakoutPageTransition"
                     ) { activeTab ->
@@ -4454,7 +4477,12 @@ internal fun BreakoutApp(
                                     Toast.makeText(context, "Your waiver queue is full.", Toast.LENGTH_SHORT).show()
                                 } else claimableSlotFor(artist, visibleRoster, activeLeague.settings)?.let { slot ->
                                     val resolvedDropSlot = dropSlot ?: if (visibleRoster[slot] == null) null else slot
-                                    waiverClaims = waiverClaims + WaiverClaimUi(artist, slot, resolvedDropSlot)
+                                    waiverClaims = waiverClaims + WaiverClaimUi(
+                                        artist = artist,
+                                        slot = slot,
+                                        dropSlot = resolvedDropSlot,
+                                        dropArtistName = resolvedDropSlot?.let { visibleRoster[it]?.name }
+                                    )
                                     Toast.makeText(context, "${artist.name} added to waivers.", Toast.LENGTH_SHORT).show()
                                 }
                             },
@@ -4471,6 +4499,7 @@ internal fun BreakoutApp(
                         BreakoutTab.Roster -> RosterScreen(
                             roster = visibleRoster,
                             waiverClaims = waiverClaims,
+                            waiverResults = waiverResultsByLeagueId[activeLeague.id].orEmpty(),
                             leagueSettings = activeLeague.settings,
                             memberCount = activeLeague.memberCount,
                             draftStatus = activeLeague.draftStatus,
@@ -4520,15 +4549,23 @@ internal fun BreakoutApp(
                             onRunWaivers = {
                                 var updatedRoster = visibleRoster
                                 var awardedWaivers = emptySet<String>()
+                                val results = mutableListOf<WaiverResultUi>()
                                 waiverClaims.forEach { claim ->
                                     if (updatedRoster.values.none { it.name == claim.artist.name }) {
-                                        claim.dropSlot?.let { dropSlot ->
-                                            updatedRoster = updatedRoster - dropSlot
+                                        val dropName = claim.dropArtistName ?: claim.dropSlot?.let { updatedRoster[it]?.name }
+                                        if (dropName != null) {
+                                            updatedRoster = updatedRoster.filterValues { !it.name.equals(dropName, ignoreCase = true) }
                                         }
-                                        firstOpenSlotFor(claim.artist, updatedRoster, activeLeague.settings)?.let { slot ->
+                                        val slot = firstOpenSlotFor(claim.artist, updatedRoster, activeLeague.settings)
+                                        if (slot != null) {
                                             updatedRoster = updatedRoster + (slot to claim.artist)
                                             awardedWaivers = awardedWaivers + claim.artist.name.lowercase()
+                                            results += WaiverResultUi(claim.artist.name, "Processed", "${claim.artist.name} was added to your roster.")
+                                        } else {
+                                            results += WaiverResultUi(claim.artist.name, "Deleted", "No valid roster slot was available when waivers ran.")
                                         }
+                                    } else {
+                                        results += WaiverResultUi(claim.artist.name, "Rejected", "A higher-priority claim processed first.")
                                     }
                                 }
                                 if (awardedWaivers.isNotEmpty()) {
@@ -4539,6 +4576,7 @@ internal fun BreakoutApp(
                                 }
                                 roster = updatedRoster
                                 waiverClaims = emptyList()
+                                waiverResultsByLeagueId = waiverResultsByLeagueId + (activeLeague.id to results)
                             },
                             onCancelWaiver = { claim -> waiverClaims = waiverClaims - claim },
                             onMoveWaiver = { claim, direction ->
@@ -4628,15 +4666,23 @@ internal fun BreakoutApp(
                             onRunWaivers = {
                                 var updatedRoster = visibleRoster
                                 var awardedWaivers = emptySet<String>()
+                                val results = mutableListOf<WaiverResultUi>()
                                 waiverClaims.forEach { claim ->
                                     if (updatedRoster.values.none { it.name == claim.artist.name }) {
-                                        claim.dropSlot?.let { dropSlot ->
-                                            updatedRoster = updatedRoster - dropSlot
+                                        val dropName = claim.dropArtistName ?: claim.dropSlot?.let { updatedRoster[it]?.name }
+                                        if (dropName != null) {
+                                            updatedRoster = updatedRoster.filterValues { !it.name.equals(dropName, ignoreCase = true) }
                                         }
-                                        firstOpenSlotFor(claim.artist, updatedRoster, activeLeague.settings)?.let { slot ->
+                                        val slot = firstOpenSlotFor(claim.artist, updatedRoster, activeLeague.settings)
+                                        if (slot != null) {
                                             updatedRoster = updatedRoster + (slot to claim.artist)
                                             awardedWaivers = awardedWaivers + claim.artist.name.lowercase()
+                                            results += WaiverResultUi(claim.artist.name, "Processed", "${claim.artist.name} was added to your roster.")
+                                        } else {
+                                            results += WaiverResultUi(claim.artist.name, "Deleted", "No valid roster slot was available when waivers ran.")
                                         }
+                                    } else {
+                                        results += WaiverResultUi(claim.artist.name, "Rejected", "A higher-priority claim processed first.")
                                     }
                                 }
                                 if (awardedWaivers.isNotEmpty()) {
@@ -4647,6 +4693,7 @@ internal fun BreakoutApp(
                                 }
                                 roster = updatedRoster
                                 waiverClaims = emptyList()
+                                waiverResultsByLeagueId = waiverResultsByLeagueId + (activeLeague.id to results)
                                 Toast.makeText(context, "Waivers processed.", Toast.LENGTH_SHORT).show()
                             },
                             onLeaveLeague = { leaveLeague(activeLeague) },
@@ -4808,7 +4855,13 @@ internal fun BreakoutApp(
                     }
                     }
 
-                    selectedArtist?.let { artist ->
+                    AnimatedVisibility(
+                        visible = selectedArtist != null,
+                        enter = fadeIn(animationSpec = tween(220)) + slideInHorizontally(animationSpec = tween(220)) { it / 10 },
+                        exit = slideOutHorizontally(animationSpec = tween(240)) { it / 8 },
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        detailArtistForAnimation?.let { artist ->
                         val droppedNames = droppedArtistsByLeagueId[activeLeague.id].orEmpty()
                         val originalDraftedPick = draftPicksByLeagueId[activeLeague.id].orEmpty()
                             .firstOrNull { it.artist.name.equals(artist.name, ignoreCase = true) }
@@ -4873,7 +4926,12 @@ internal fun BreakoutApp(
                                 if (waiverClaims.size >= activeLeague.settings.maxWaiverClaims) {
                                     Toast.makeText(context, "Your waiver queue is full.", Toast.LENGTH_SHORT).show()
                                 } else claimableSlotFor(artist, visibleRoster, activeLeague.settings)?.let { slot ->
-                                    waiverClaims = waiverClaims + WaiverClaimUi(artist, slot, dropSlot)
+                                    waiverClaims = waiverClaims + WaiverClaimUi(
+                                        artist = artist,
+                                        slot = slot,
+                                        dropSlot = dropSlot,
+                                        dropArtistName = dropSlot?.let { visibleRoster[it]?.name }
+                                    )
                                     Toast.makeText(context, "${artist.name} added to waivers.", Toast.LENGTH_SHORT).show()
                                 }
                             },
@@ -4887,6 +4945,7 @@ internal fun BreakoutApp(
                                 selectedArtistReadOnly = false
                             }
                         )
+                        }
                         }
                     }
                     pendingDraftExitTab?.let { targetTab ->
@@ -4922,6 +4981,17 @@ internal fun BreakoutApp(
                                 .padding(top = BreakoutDimensions.sm)
                         )
                     }
+                }
+                AnimatedVisibility(
+                    visible = startupLoading || leagueSwitchLoading,
+                    enter = fadeIn(animationSpec = tween(220)) + slideInVertically(animationSpec = tween(220)) { it / 16 },
+                    exit = slideOutVertically(animationSpec = tween(260)) { -it / 18 },
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    AppStartupLoadingScreen(
+                        progress = if (startupLoading) startupProgress else leagueSwitchProgress,
+                        message = if (startupLoading) startupMessage else leagueSwitchMessage
+                    )
                 }
             }
         }

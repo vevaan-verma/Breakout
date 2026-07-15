@@ -15,15 +15,19 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -109,7 +113,7 @@ internal fun TradeScreen(
         BreakoutCard {
             Text("Build Offer", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
             if (tradeMembers.isEmpty()) {
-                StatusCard("No Trade Partners", "Invite another member before sending trades.")
+                StatusCard("No Members Available", "Invite another member before sending trades.")
             } else {
                 TradeMemberPicker(
                     members = tradeMembers,
@@ -139,7 +143,7 @@ internal fun TradeScreen(
                     StatusCard("Trade Check", validation)
                 }
                 PrimaryButton(
-                    text = "Send ${offeredItems.size}-for-${requestedItems.size} Trade",
+                    text = "Send Trade",
                     enabled = validation == null && selectedMember != null && offeredItems.isNotEmpty() && requestedItems.isNotEmpty(),
                     modifier = Modifier.fillMaxWidth(),
                     onClick = {
@@ -177,65 +181,64 @@ private fun TradeMemberPicker(
 ) {
     var expanded by rememberSaveable { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)) {
-        Text("Partner", color = BreakoutTextSecondary, style = MaterialTheme.typography.labelLarge)
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(BreakoutDimensions.SmallCornerRadius))
-                .clickable { expanded = !expanded },
-            color = BreakoutSurfaceVariant.copy(alpha = 0.76f),
-            shape = RoundedCornerShape(BreakoutDimensions.SmallCornerRadius),
-            border = BorderStroke(1.dp, BreakoutPrimary.copy(alpha = 0.42f))
-        ) {
-            Row(
-                modifier = Modifier.padding(BreakoutDimensions.md),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+        Text("Trade With", color = BreakoutTextSecondary, style = MaterialTheme.typography.labelLarge)
+        BoxWithConstraints {
+            val menuWidth = maxWidth
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(BreakoutDimensions.SmallCornerRadius))
+                    .clickable { expanded = true },
+                color = BreakoutSurfaceVariant.copy(alpha = 0.76f),
+                shape = RoundedCornerShape(BreakoutDimensions.SmallCornerRadius),
+                border = BorderStroke(1.dp, BreakoutPrimary.copy(alpha = 0.42f))
             ) {
-                Text(
-                    selectedUsername.ifBlank { "Choose member" },
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(if (expanded) "Close" else "Change", color = BreakoutPrimary, fontWeight = FontWeight.Bold)
+                Row(
+                    modifier = Modifier.padding(BreakoutDimensions.md),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        selectedUsername.ifBlank { "Choose member" },
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text("Select", color = BreakoutPrimary, fontWeight = FontWeight.Bold)
+                }
             }
-        }
-        AnimatedContent(
-            targetState = expanded,
-            transitionSpec = {
-                (fadeIn(tween(180)) + slideInVertically(tween(180)) { -it / 8 }) togetherWith
-                    (fadeOut(tween(120)) + slideOutVertically(tween(120)) { -it / 8 })
-            },
-            label = "tradePartnerDropdown"
-        ) { open ->
-            if (open) {
-                Column(verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.xs)) {
-                    members.forEach { member ->
-                        val selected = member.username == selectedUsername
-                        Surface(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(BreakoutDimensions.SmallCornerRadius))
-                                .clickable {
-                                    expanded = false
-                                    onSelected(member)
-                                },
-                            color = if (selected) BreakoutPrimary.copy(alpha = 0.18f) else BreakoutSurfaceVariant.copy(alpha = 0.52f),
-                            shape = RoundedCornerShape(BreakoutDimensions.SmallCornerRadius),
-                            border = BorderStroke(1.dp, if (selected) BreakoutPrimary.copy(alpha = 0.58f) else BreakoutOutline.copy(alpha = 0.25f))
-                        ) {
-                            Text(
-                                member.username,
-                                modifier = Modifier.padding(BreakoutDimensions.md),
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+                modifier = Modifier
+                    .width(menuWidth)
+                    .background(BreakoutSurface)
+                    .border(1.dp, BreakoutPrimary.copy(alpha = 0.34f), RoundedCornerShape(BreakoutDimensions.SmallCornerRadius))
+            ) {
+                members.forEach { member ->
+                    DropdownMenuItem(
+                        text = {
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                color = if (member.username == selectedUsername) BreakoutPrimary.copy(alpha = 0.18f) else BreakoutSurfaceVariant.copy(alpha = 0.38f),
+                                shape = RoundedCornerShape(BreakoutDimensions.SmallCornerRadius),
+                                border = BorderStroke(1.dp, if (member.username == selectedUsername) BreakoutPrimary.copy(alpha = 0.42f) else BreakoutOutline.copy(alpha = 0.18f))
+                            ) {
+                                Text(
+                                    member.username,
+                                    modifier = Modifier.padding(horizontal = BreakoutDimensions.md, vertical = BreakoutDimensions.sm),
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        },
+                        onClick = {
+                            expanded = false
+                            onSelected(member)
                         }
-                    }
+                    )
                 }
             }
         }
@@ -280,8 +283,19 @@ private fun TradeRosterPicker(
                         Box(modifier = Modifier.clickable { onArtistSelected(artist) }) {
                             ArtistArtwork(artist = artist, size = BreakoutDimensions.ArtworkList)
                         }
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(artist.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Column(
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(
+                                artist.name,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(BreakoutDimensions.xs))
+                                    .clickable { onArtistSelected(artist) },
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Black,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                             Text(slot.label, color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium)
                         }
                         SelectionDot(selected)
@@ -421,14 +435,14 @@ private fun tradeValidation(
     theirRoster: Map<RosterSlot, ArtistUi>
 ): String? {
     if (offeredItems.isEmpty()) return "Pick at least one artist from your roster."
-    if (requestedItems.isEmpty()) return "Pick at least one artist from the other roster."
+    if (requestedItems.isEmpty()) return "Pick at least one artist from the selected member's roster."
     val myOpenSlots = myRoster.keys.toMutableSet().apply { addAll(offeredItems.map { it.slot }) }
     val theirOpenSlots = theirRoster.keys.toMutableSet().apply { addAll(requestedItems.map { it.slot }) }
     if (!requestedItems.all { item -> myOpenSlots.any { it.canHold(item.artist) } }) {
         return "One requested artist does not fit your roster after the trade."
     }
     if (!offeredItems.all { item -> theirOpenSlots.any { it.canHold(item.artist) } }) {
-        return "One offered artist does not fit the other roster after the trade."
+        return "One offered artist does not fit the selected member's roster after the trade."
     }
     return null
 }

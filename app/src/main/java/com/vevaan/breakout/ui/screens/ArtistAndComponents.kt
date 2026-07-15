@@ -93,6 +93,7 @@ import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -237,8 +238,14 @@ internal fun ArtistDetailScreen(
         }
     }
     val shownArtist = detailArtist
-    if (!detailReady) {
-        Box(modifier = Modifier.fillMaxSize()) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        AnimatedVisibility(
+            modifier = Modifier.fillMaxSize(),
+            visible = !detailReady,
+            enter = fadeIn(animationSpec = tween(220)) + slideInVertically(animationSpec = tween(220)) { it / 16 },
+            exit = slideOutVertically(animationSpec = tween(260)) { -it / 18 }
+        ) {
+            Box(modifier = Modifier.fillMaxSize()) {
             ArtistLoadingScreen()
             Row(
                 modifier = Modifier
@@ -250,15 +257,15 @@ internal fun ArtistDetailScreen(
                 OverlayBackButton(onClick = onBack)
             }
         }
-    } else Box(modifier = Modifier.fillMaxSize()) {
+        }
         AnimatedVisibility(
             modifier = Modifier.fillMaxSize(),
-            visible = detailContentVisible,
+            visible = detailReady && detailContentVisible,
             enter = fadeIn() + slideInVertically { it / 12 },
-            exit = fadeOut()
+            exit = slideOutVertically { it / 18 }
         ) {
             ScreenColumn {
-                Box(modifier = Modifier.height(58.dp))
+                Box(modifier = Modifier.height(44.dp))
                 ArtistArtwork(artist = shownArtist, size = 260.dp)
                 Text(shownArtist.name, style = MaterialTheme.typography.headlineLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.CardSpacing)) {
@@ -526,7 +533,7 @@ internal fun WaiverDropSlotDialog(
                     border = BorderStroke(1.dp, WaiverAccent.copy(alpha = 0.30f))
                 ) {
                     Text(
-                        text = "The replacement is only dropped if your waiver claim is awarded. If another member gets the artist first, your roster stays unchanged.",
+                        text = "The replacement is only dropped if your waiver claim is processed. If a higher-priority claim wins that artist first, your claim is rejected and your roster stays unchanged.",
                         modifier = Modifier.padding(BreakoutDimensions.md),
                         color = BreakoutTextPrimary,
                         style = MaterialTheme.typography.bodyMedium
@@ -550,19 +557,7 @@ internal fun WaiverDropSlotDialog(
                             ArtistArtwork(artist = currentArtist, size = BreakoutDimensions.ArtworkList)
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(currentArtist.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text("Would leave ${slot.label}", color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium)
-                            }
-                            Surface(
-                                color = WaiverAccent.copy(alpha = 0.16f),
-                                shape = RoundedCornerShape(999.dp),
-                                border = BorderStroke(1.dp, WaiverAccent.copy(alpha = 0.38f))
-                            ) {
-                                Text(
-                                    "Pick",
-                                    modifier = Modifier.padding(horizontal = BreakoutDimensions.md, vertical = BreakoutDimensions.xs),
-                                    color = WaiverAccent,
-                                    fontWeight = FontWeight.Black
-                                )
+                                Text(currentArtist.tag, color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                         }
                     }
@@ -699,35 +694,10 @@ internal fun LeagueDrawer(
                             .clip(CircleShape)
                             .background(BreakoutPrimary.copy(alpha = 0.16f))
                             .border(1.dp, BreakoutPrimary.copy(alpha = 0.42f), CircleShape)
-                            .clickable { leagueActionMode = if (leagueActionMode == "menu") null else "menu" },
+                            .clickable { leagueActionMode = "choice" },
                         contentAlignment = Alignment.Center
                     ) {
                         Text("+", color = BreakoutPrimary, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
-                        if (leagueActionMode == "menu") {
-                            Popup(
-                                alignment = Alignment.TopEnd,
-                                offset = IntOffset(0, -132),
-                                onDismissRequest = { leagueActionMode = null },
-                                properties = PopupProperties(focusable = true)
-                            ) {
-                                Surface(
-                                    color = BreakoutSurface.copy(alpha = 0.98f),
-                                    shape = RoundedCornerShape(BreakoutDimensions.CardCornerRadius),
-                                    border = BorderStroke(1.dp, BreakoutPrimary.copy(alpha = 0.38f)),
-                                    tonalElevation = 8.dp
-                                ) {
-                                    Column(
-                                        modifier = Modifier
-                                            .width(220.dp)
-                                            .padding(BreakoutDimensions.sm),
-                                        verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.xs)
-                                    ) {
-                                        DrawerActionChoice("Create new league") { leagueActionMode = "create" }
-                                        DrawerActionChoice("Join existing league") { leagueActionMode = "join" }
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
                 if (leagues.isEmpty()) {
@@ -743,6 +713,13 @@ internal fun LeagueDrawer(
                 }
             }
         }
+    }
+    if (leagueActionMode == "choice") {
+        LeagueChoiceDialog(
+            onDismiss = { leagueActionMode = null },
+            onCreate = { leagueActionMode = "create" },
+            onJoin = { leagueActionMode = "join" }
+        )
     }
     if (leagueActionMode == "create") {
         LeagueActionDialog(
@@ -772,6 +749,40 @@ internal fun LeagueDrawer(
 }
 
 @Composable
+internal fun LeagueChoiceDialog(
+    onDismiss: () -> Unit,
+    onCreate: () -> Unit,
+    onJoin: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier
+                .padding(horizontal = BreakoutDimensions.lg)
+                .fillMaxWidth()
+                .widthIn(max = 430.dp),
+            color = Color(0xFF171B25),
+            shape = RoundedCornerShape(28.dp),
+            border = BorderStroke(1.dp, BreakoutPrimary.copy(alpha = 0.42f)),
+            tonalElevation = 14.dp
+        ) {
+            Column(
+                modifier = Modifier.padding(BreakoutDimensions.xl),
+                verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.md)
+            ) {
+                Text("Add League", color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                Text("Create a fresh league or join one with an invite code.", color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium)
+                DrawerActionChoice("Create new league", onCreate)
+                DrawerActionChoice("Join existing league", onJoin)
+                SecondaryButton("Cancel", modifier = Modifier.fillMaxWidth(), onClick = onDismiss)
+            }
+        }
+    }
+}
+
+@Composable
 internal fun DrawerActionChoice(label: String, onClick: () -> Unit) {
     Row(
         modifier = Modifier
@@ -783,7 +794,7 @@ internal fun DrawerActionChoice(label: String, onClick: () -> Unit) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(label, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+        Text(label, color = BreakoutTextPrimary, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
         Text(">", color = BreakoutPrimary, fontWeight = FontWeight.Black)
     }
 }
@@ -821,7 +832,7 @@ internal fun LeagueActionDialog(
                     .padding(BreakoutDimensions.xl),
                 verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.md)
             ) {
-                Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                Text(title, color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
                 StyledTextField(
                     value = value,
                     onValueChange = onValueChange,
@@ -2118,6 +2129,7 @@ internal fun ArtistLoadingScreen() {
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
             .statusBarsPadding()
             .padding(BreakoutDimensions.ScreenHorizontalPadding),
         contentAlignment = Alignment.Center
@@ -2177,6 +2189,7 @@ internal fun MarketInitializingScreen(onOpenMenu: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
             .statusBarsPadding()
             .padding(BreakoutDimensions.ScreenHorizontalPadding),
         contentAlignment = Alignment.Center
@@ -2543,7 +2556,16 @@ internal fun String.cleanUsernameInput(): String =
     filter { it.isLetterOrDigit() || it == '_' }.take(MaxUsernameLength)
 
 internal fun isValidUsername(username: String): Boolean =
-    username.matches(Regex("^[A-Za-z0-9_]{3,$MaxUsernameLength}$"))
+    username.matches(Regex("^[A-Za-z0-9_]{$MinUsernameLength,$MaxUsernameLength}$")) &&
+        !username.equals("you", ignoreCase = true)
+
+internal fun usernameValidationMessage(username: String): String = when {
+    username.length < MinUsernameLength -> "Username must be at least $MinUsernameLength characters."
+    username.length > MaxUsernameLength -> "Username must be $MaxUsernameLength characters or fewer."
+    username.equals("you", ignoreCase = true) -> "Username cannot be You because Breakout uses You to label your own picks."
+    !username.matches(Regex("^[A-Za-z0-9_]+$")) -> "Username can only use letters, numbers, and underscores."
+    else -> "Username must be $MinUsernameLength-$MaxUsernameLength letters, numbers, or underscores."
+}
 
 internal fun isValidEmail(email: String): Boolean =
     email.trim().let { value ->
@@ -2952,7 +2974,7 @@ internal fun friendlyAuthError(rawMessage: String?, mode: AuthMode): String {
             "Enter a valid email address."
         message.contains("Username must be", ignoreCase = true) ||
             message.contains("profiles_username_format", ignoreCase = true) ->
-            "Username must be 3-24 letters, numbers, or underscores."
+            "Username must be $MinUsernameLength-$MaxUsernameLength letters, numbers, or underscores, and cannot be You."
         message.contains("username is already taken", ignoreCase = true) ||
             message.contains("That username is already taken", ignoreCase = true) ||
             message.contains("duplicate", ignoreCase = true) && message.contains("username", ignoreCase = true) ->
@@ -3036,7 +3058,7 @@ internal fun friendlyAccountError(rawMessage: String?): String {
             "Your session expired. Please log in again."
         message.contains("Username must be", ignoreCase = true) ||
             message.contains("profiles_username_format", ignoreCase = true) ->
-            "Username must be 3-24 letters, numbers, or underscores."
+            "Username must be $MinUsernameLength-$MaxUsernameLength letters, numbers, or underscores, and cannot be You."
         message.contains("username is already taken", ignoreCase = true) ||
             message.contains("That username is already taken", ignoreCase = true) ||
             message.contains("duplicate key", ignoreCase = true) && message.contains("username", ignoreCase = true) ->
