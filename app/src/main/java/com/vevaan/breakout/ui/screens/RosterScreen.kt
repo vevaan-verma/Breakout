@@ -273,7 +273,7 @@ internal fun RosterScreen(
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height((waiverClaims.size * 180).dp),
+                            .height((waiverClaims.size * 170).dp),
                         userScrollEnabled = false,
                         verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
                     ) {
@@ -638,4 +638,3 @@ internal fun WaiverOrderRow(rank: Int, team: String) {
         Text(team, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
-

@@ -1,5 +1,14 @@
 package com.vevaan.breakout
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -20,7 +29,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -48,7 +56,7 @@ internal fun TradeScreen(
     refreshing: Boolean,
     onRefresh: () -> Unit,
     onOpenMenu: () -> Unit,
-    onSendTrade: (LeagueMemberUi, RosterSlot, ArtistUi, RosterSlot, ArtistUi) -> Unit,
+    onSendTrade: (LeagueMemberUi, List<TradeArtistItemUi>, List<TradeArtistItemUi>) -> Unit,
     onAcceptTrade: (TradeOfferUi) -> Unit,
     onDeclineTrade: (TradeOfferUi) -> Unit,
     onCancelTrade: (TradeOfferUi) -> Unit,
@@ -61,12 +69,16 @@ internal fun TradeScreen(
         mutableStateOf(tradeMembers.firstOrNull()?.username.orEmpty())
     }
     val selectedMember = tradeMembers.firstOrNull { it.username == selectedMemberName } ?: tradeMembers.firstOrNull()
-    var offeredSlotName by rememberSaveable(league.id, roster.size) { mutableStateOf("") }
-    var requestedSlotName by rememberSaveable(league.id, selectedMemberName) { mutableStateOf("") }
-    val selectedOffer = roster.entries.firstOrNull { it.key.name == offeredSlotName } ?: roster.entries.firstOrNull()
+    var offeredSlotNames by rememberSaveable(league.id, roster.size) { mutableStateOf(setOf<String>()) }
+    var requestedSlotNames by rememberSaveable(league.id, selectedMemberName) { mutableStateOf(setOf<String>()) }
     val memberRoster = selectedMember?.let { rosterForMemberName(it.username, draftPicks) }.orEmpty()
-    val selectedRequest = memberRoster.entries.firstOrNull { it.key.name == requestedSlotName } ?: memberRoster.entries.firstOrNull()
-    val validation = tradeValidation(selectedOffer, selectedRequest)
+    val offeredItems = roster.entries
+        .filter { it.key.name in offeredSlotNames }
+        .map { TradeArtistItemUi(it.value, it.key) }
+    val requestedItems = memberRoster.entries
+        .filter { it.key.name in requestedSlotNames }
+        .map { TradeArtistItemUi(it.value, it.key) }
+    val validation = tradeValidation(offeredItems, requestedItems, roster, memberRoster)
 
     ScreenColumn(
         refreshing = refreshing,
@@ -79,7 +91,7 @@ internal fun TradeScreen(
         ) {
             Text("Trade Center", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
             Text(
-                "Offers expire after 48 hours and process instantly when accepted.",
+                "Build multi-artist offers. Trades expire after 48 hours and process instantly when accepted.",
                 color = BreakoutTextSecondary,
                 style = MaterialTheme.typography.bodyMedium
             )
@@ -104,35 +116,35 @@ internal fun TradeScreen(
                     selectedUsername = selectedMember?.username.orEmpty(),
                     onSelected = {
                         selectedMemberName = it.username
-                        requestedSlotName = ""
+                        requestedSlotNames = emptySet()
                     }
                 )
                 TradeRosterPicker(
                     title = "You Give",
                     entries = roster.entries.toList(),
-                    selectedSlot = selectedOffer?.key,
-                    onSelected = { offeredSlotName = it.name },
+                    selectedSlots = offeredSlotNames,
+                    onSelected = { slot -> offeredSlotNames = offeredSlotNames.toggle(slot.name) },
                     onArtistSelected = onArtistSelected
                 )
-                TradeRosterPicker(
-                    title = "You Get",
-                    entries = memberRoster.entries.toList(),
-                    selectedSlot = selectedRequest?.key,
-                    onSelected = { requestedSlotName = it.name },
-                    onArtistSelected = onArtistSelected
-                )
+                Crossfade(targetState = selectedMember?.username.orEmpty(), label = "tradePartnerRoster") {
+                    TradeRosterPicker(
+                        title = "You Get",
+                        entries = memberRoster.entries.toList(),
+                        selectedSlots = requestedSlotNames,
+                        onSelected = { slot -> requestedSlotNames = requestedSlotNames.toggle(slot.name) },
+                        onArtistSelected = onArtistSelected
+                    )
+                }
                 if (validation != null) {
                     StatusCard("Trade Check", validation)
                 }
                 PrimaryButton(
-                    text = "Send Trade",
-                    enabled = validation == null && selectedMember != null && selectedOffer != null && selectedRequest != null,
+                    text = "Send ${offeredItems.size}-for-${requestedItems.size} Trade",
+                    enabled = validation == null && selectedMember != null && offeredItems.isNotEmpty() && requestedItems.isNotEmpty(),
                     modifier = Modifier.fillMaxWidth(),
                     onClick = {
                         val member = selectedMember ?: return@PrimaryButton
-                        val offer = selectedOffer ?: return@PrimaryButton
-                        val request = selectedRequest ?: return@PrimaryButton
-                        onSendTrade(member, offer.key, offer.value, request.key, request.value)
+                        onSendTrade(member, offeredItems, requestedItems)
                     }
                 )
             }
@@ -163,27 +175,68 @@ private fun TradeMemberPicker(
     selectedUsername: String,
     onSelected: (LeagueMemberUi) -> Unit
 ) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)) {
         Text("Partner", color = BreakoutTextSecondary, style = MaterialTheme.typography.labelLarge)
-        members.forEach { member ->
-            val selected = member.username == selectedUsername
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(BreakoutDimensions.SmallCornerRadius))
-                    .clickable { onSelected(member) },
-                color = if (selected) BreakoutPrimary.copy(alpha = 0.18f) else BreakoutSurfaceVariant.copy(alpha = 0.72f),
-                shape = RoundedCornerShape(BreakoutDimensions.SmallCornerRadius),
-                border = BorderStroke(1.dp, if (selected) BreakoutPrimary.copy(alpha = 0.58f) else BreakoutOutline.copy(alpha = 0.35f))
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(BreakoutDimensions.SmallCornerRadius))
+                .clickable { expanded = !expanded },
+            color = BreakoutSurfaceVariant.copy(alpha = 0.76f),
+            shape = RoundedCornerShape(BreakoutDimensions.SmallCornerRadius),
+            border = BorderStroke(1.dp, BreakoutPrimary.copy(alpha = 0.42f))
+        ) {
+            Row(
+                modifier = Modifier.padding(BreakoutDimensions.md),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    member.username,
-                    modifier = Modifier.padding(BreakoutDimensions.md),
+                    selectedUsername.ifBlank { "Choose member" },
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                Text(if (expanded) "Close" else "Change", color = BreakoutPrimary, fontWeight = FontWeight.Bold)
+            }
+        }
+        AnimatedContent(
+            targetState = expanded,
+            transitionSpec = {
+                (fadeIn(tween(180)) + slideInVertically(tween(180)) { -it / 8 }) togetherWith
+                    (fadeOut(tween(120)) + slideOutVertically(tween(120)) { -it / 8 })
+            },
+            label = "tradePartnerDropdown"
+        ) { open ->
+            if (open) {
+                Column(verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.xs)) {
+                    members.forEach { member ->
+                        val selected = member.username == selectedUsername
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(BreakoutDimensions.SmallCornerRadius))
+                                .clickable {
+                                    expanded = false
+                                    onSelected(member)
+                                },
+                            color = if (selected) BreakoutPrimary.copy(alpha = 0.18f) else BreakoutSurfaceVariant.copy(alpha = 0.52f),
+                            shape = RoundedCornerShape(BreakoutDimensions.SmallCornerRadius),
+                            border = BorderStroke(1.dp, if (selected) BreakoutPrimary.copy(alpha = 0.58f) else BreakoutOutline.copy(alpha = 0.25f))
+                        ) {
+                            Text(
+                                member.username,
+                                modifier = Modifier.padding(BreakoutDimensions.md),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -193,17 +246,23 @@ private fun TradeMemberPicker(
 private fun TradeRosterPicker(
     title: String,
     entries: List<Map.Entry<RosterSlot, ArtistUi>>,
-    selectedSlot: RosterSlot?,
+    selectedSlots: Set<String>,
     onSelected: (RosterSlot) -> Unit,
     onArtistSelected: (ArtistUi) -> Unit
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)) {
-        Text(title, color = BreakoutTextSecondary, style = MaterialTheme.typography.labelLarge)
+    Column(
+        modifier = Modifier.animateContentSize(),
+        verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
+    ) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(title, color = BreakoutTextSecondary, style = MaterialTheme.typography.labelLarge)
+            Text("${selectedSlots.size} selected", color = BreakoutPrimary, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+        }
         if (entries.isEmpty()) {
             StatusCard("No Artists", "This roster has no artists available.")
         } else {
             entries.forEach { (slot, artist) ->
-                val selected = slot == selectedSlot
+                val selected = slot.name in selectedSlots
                 Surface(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -279,9 +338,9 @@ private fun TradeOfferCard(
             }
             TradeSwapRow(
                 leftLabel = "${offer.proposerUsername} gives",
-                leftArtist = offer.offeredArtist,
+                leftItems = offer.offeredItems,
                 rightLabel = "${offer.recipientUsername} gives",
-                rightArtist = offer.requestedArtist,
+                rightItems = offer.requestedItems,
                 onArtistSelected = onArtistSelected
             )
             if (offer.status == "pending") {
@@ -301,26 +360,27 @@ private fun TradeOfferCard(
 @Composable
 private fun TradeSwapRow(
     leftLabel: String,
-    leftArtist: ArtistUi,
+    leftItems: List<TradeArtistItemUi>,
     rightLabel: String,
-    rightArtist: ArtistUi,
+    rightItems: List<TradeArtistItemUi>,
     onArtistSelected: (ArtistUi) -> Unit
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)) {
-        TradeMiniArtist(leftLabel, leftArtist, Modifier.weight(1f), onClick = { onArtistSelected(leftArtist) })
-        Box(modifier = Modifier.align(Alignment.CenterVertically)) {
-            Text("⇄", color = BreakoutPrimary, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
-        }
-        TradeMiniArtist(rightLabel, rightArtist, Modifier.weight(1f), onClick = { onArtistSelected(rightArtist) })
+    Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm), verticalAlignment = Alignment.CenterVertically) {
+        TradeMiniArtistStack(leftLabel, leftItems, Modifier.weight(1f), onArtistSelected)
+        Text("⇄", color = BreakoutPrimary, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+        TradeMiniArtistStack(rightLabel, rightItems, Modifier.weight(1f), onArtistSelected)
     }
 }
 
 @Composable
-private fun TradeMiniArtist(label: String, artist: ArtistUi, modifier: Modifier, onClick: () -> Unit) {
+private fun TradeMiniArtistStack(
+    label: String,
+    items: List<TradeArtistItemUi>,
+    modifier: Modifier,
+    onArtistSelected: (ArtistUi) -> Unit
+) {
     Surface(
-        modifier = modifier
-            .clip(RoundedCornerShape(BreakoutDimensions.SmallCornerRadius))
-            .clickable(onClick = onClick),
+        modifier = modifier,
         color = BreakoutSurface.copy(alpha = 0.55f),
         shape = RoundedCornerShape(BreakoutDimensions.SmallCornerRadius),
         border = BorderStroke(1.dp, BreakoutOutline.copy(alpha = 0.25f))
@@ -329,24 +389,48 @@ private fun TradeMiniArtist(label: String, artist: ArtistUi, modifier: Modifier,
             modifier = Modifier.padding(BreakoutDimensions.sm),
             verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.xs)
         ) {
-            ArtistArtwork(artist = artist, size = 48.dp)
             Text(label, color = BreakoutTextSecondary, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(artist.name, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Black, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            items.take(3).forEach { item ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(BreakoutDimensions.xs))
+                        .clickable { onArtistSelected(item.artist) }
+                        .padding(vertical = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.xs),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    ArtistArtwork(artist = item.artist, size = 34.dp)
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(item.artist.name, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Black, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(item.slot.label, color = BreakoutTextSecondary, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+            if (items.size > 3) {
+                Text("+${items.size - 3} more", color = BreakoutPrimary, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+            }
         }
     }
 }
 
 private fun tradeValidation(
-    selectedOffer: Map.Entry<RosterSlot, ArtistUi>?,
-    selectedRequest: Map.Entry<RosterSlot, ArtistUi>?
+    offeredItems: List<TradeArtistItemUi>,
+    requestedItems: List<TradeArtistItemUi>,
+    myRoster: Map<RosterSlot, ArtistUi>,
+    theirRoster: Map<RosterSlot, ArtistUi>
 ): String? {
-    val offer = selectedOffer ?: return "Pick one artist from your roster."
-    val request = selectedRequest ?: return "Pick one artist from the other roster."
-    return when {
-        !offer.key.canHold(request.value) -> "${request.value.name} does not fit in your ${offer.key.label} slot."
-        !request.key.canHold(offer.value) -> "${offer.value.name} does not fit in their ${request.key.label} slot."
-        else -> null
+    if (offeredItems.isEmpty()) return "Pick at least one artist from your roster."
+    if (requestedItems.isEmpty()) return "Pick at least one artist from the other roster."
+    val myOpenSlots = myRoster.keys.toMutableSet().apply { addAll(offeredItems.map { it.slot }) }
+    val theirOpenSlots = theirRoster.keys.toMutableSet().apply { addAll(requestedItems.map { it.slot }) }
+    if (!requestedItems.all { item -> myOpenSlots.any { it.canHold(item.artist) } }) {
+        return "One requested artist does not fit your roster after the trade."
     }
+    if (!offeredItems.all { item -> theirOpenSlots.any { it.canHold(item.artist) } }) {
+        return "One offered artist does not fit the other roster after the trade."
+    }
+    return null
 }
 
 private fun tradeAccent(offer: TradeOfferUi) = when (offer.status) {
@@ -354,3 +438,6 @@ private fun tradeAccent(offer: TradeOfferUi) = when (offer.status) {
     "declined", "canceled", "expired" -> BreakoutCoral
     else -> if (offer.incoming) WaiverAccent else BreakoutPrimary
 }
+
+private fun Set<String>.toggle(value: String): Set<String> =
+    if (value in this) this - value else this + value

@@ -264,7 +264,7 @@ internal fun ScreenColumn(
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(bottom = BreakoutDimensions.sm)
+                                .padding(bottom = BreakoutDimensions.xs)
                         ) {
                             stickyTopBar()
                         }
@@ -336,30 +336,7 @@ internal fun AppStartupLoadingScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(92.dp)
-                        .clip(CircleShape)
-                        .background(
-                            Brush.radialGradient(
-                                colors = listOf(WaiverAccent.copy(alpha = 0.24f), BreakoutPrimary.copy(alpha = 0.28f), BreakoutSurfaceVariant)
-                            )
-                        )
-                        .border(1.dp, BreakoutPrimary.copy(alpha = 0.42f), CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(3.dp)
-                    ) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.Bottom) {
-                            Box(Modifier.size(width = 7.dp, height = 18.dp).clip(RoundedCornerShape(999.dp)).background(BreakoutPrimary))
-                            Box(Modifier.size(width = 7.dp, height = 30.dp).clip(RoundedCornerShape(999.dp)).background(WaiverAccent))
-                            Box(Modifier.size(width = 7.dp, height = 23.dp).clip(RoundedCornerShape(999.dp)).background(BreakoutPrimary))
-                        }
-                        Text("B", color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
-                    }
-                }
+                BreakoutMark(size = 92.dp)
                 Text(
                     "Breakout",
                     color = MaterialTheme.colorScheme.onBackground,

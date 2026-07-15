@@ -300,6 +300,8 @@ create table if not exists public.trade_offers (
 
 alter table public.trade_offers add column if not exists expires_at timestamptz not null default (now() + interval '48 hours');
 alter table public.trade_offers add column if not exists responded_at timestamptz;
+alter table public.trade_offers add column if not exists offered_items jsonb not null default '[]'::jsonb;
+alter table public.trade_offers add column if not exists requested_items jsonb not null default '[]'::jsonb;
 
 alter table public.profiles enable row level security;
 alter table public.leagues enable row level security;
@@ -1670,12 +1672,58 @@ $$;
 
 grant execute on function public.artist_fits_roster_slot(uuid, text) to authenticated;
 
+create or replace function public.trade_item_payload(target_roster public.rosters)
+returns jsonb
+language sql
+security definer
+set search_path = public
+as $$
+    select jsonb_build_object(
+        'artist_id', artists.id,
+        'name', coalesce(artists.display_name, artists.normalized_name),
+        'image_url', artists.image_url,
+        'slot', target_roster.roster_slot
+    )
+    from public.artists
+    where artists.id = target_roster.artist_id;
+$$;
+
+grant execute on function public.trade_item_payload(public.rosters) to authenticated;
+
+create or replace function public.trade_active_slots(target_league_id uuid)
+returns text[]
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    league_record public.leagues%rowtype;
+    slots text[] := '{}';
+    all_headliners text[] := array['HeadlinerOne','HeadlinerTwo','HeadlinerThree','HeadlinerFour'];
+    all_wildcards text[] := array['WildcardOne','WildcardTwo','WildcardThree','WildcardFour'];
+    all_rising text[] := array['RisingOne','RisingTwo','RisingThree','RisingFour'];
+    all_deepcuts text[] := array['DeepCutOne','DeepCutTwo','DeepCutThree'];
+    all_bench text[] := array['BenchOne','BenchTwo','BenchThree','BenchFour','BenchFive','BenchSix'];
+begin
+    select * into league_record from public.leagues where id = target_league_id;
+    slots := slots || all_headliners[1:league_record.headliner_slots];
+    slots := slots || all_wildcards[1:league_record.wildcard_slots];
+    slots := slots || all_rising[1:league_record.rising_slots];
+    slots := slots || all_deepcuts[1:league_record.deep_cut_slots];
+    slots := slots || all_bench[1:league_record.bench_slots];
+    return slots;
+end;
+$$;
+
+grant execute on function public.trade_active_slots(uuid) to authenticated;
+
 drop function if exists public.create_trade_offer(uuid, text, text, text);
+drop function if exists public.create_trade_offer(uuid, text, jsonb, jsonb);
 create or replace function public.create_trade_offer(
     target_league_id uuid,
     target_username text,
-    offered_artist_name text,
-    requested_artist_name text
+    offered_artist_names jsonb,
+    requested_artist_names jsonb
 )
 returns uuid
 language plpgsql
@@ -1687,6 +1735,11 @@ declare
     recipient uuid;
     offered_roster public.rosters%rowtype;
     requested_roster public.rosters%rowtype;
+    offered_payload jsonb := '[]'::jsonb;
+    requested_payload jsonb := '[]'::jsonb;
+    offered_first public.rosters%rowtype;
+    requested_first public.rosters%rowtype;
+    item_name text;
     trade_id uuid;
 begin
     if proposer is null then
@@ -1717,36 +1770,51 @@ begin
         raise exception 'You are not in this league';
     end if;
 
-    select rosters.* into offered_roster
-    from public.rosters
-    join public.artists on artists.id = rosters.artist_id
-    where rosters.league_id = target_league_id
-    and rosters.user_id = proposer
-    and rosters.released_at is null
-    and lower(coalesce(artists.display_name, artists.normalized_name)) = lower(trim(offered_artist_name))
-    limit 1;
+    if jsonb_array_length(offered_artist_names) = 0 or jsonb_array_length(requested_artist_names) = 0 then
+        raise exception 'Choose at least one artist from each roster';
+    end if;
 
-    select rosters.* into requested_roster
-    from public.rosters
-    join public.artists on artists.id = rosters.artist_id
-    where rosters.league_id = target_league_id
-    and rosters.user_id = recipient
-    and rosters.released_at is null
-    and lower(coalesce(artists.display_name, artists.normalized_name)) = lower(trim(requested_artist_name))
-    limit 1;
+    for item_name in select jsonb_array_elements_text(offered_artist_names)
+    loop
+        offered_roster := null;
+        select rosters.* into offered_roster
+        from public.rosters
+        join public.artists on artists.id = rosters.artist_id
+        where rosters.league_id = target_league_id
+        and rosters.user_id = proposer
+        and rosters.released_at is null
+        and lower(coalesce(artists.display_name, artists.normalized_name)) = lower(trim(item_name))
+        limit 1;
 
-    if offered_roster.id is null then
-        raise exception 'You no longer have that artist on your roster';
-    end if;
-    if requested_roster.id is null then
-        raise exception 'That member no longer has the requested artist';
-    end if;
-    if not public.artist_fits_roster_slot(requested_roster.artist_id, offered_roster.roster_slot) then
-        raise exception 'Requested artist does not fit your roster slot';
-    end if;
-    if not public.artist_fits_roster_slot(offered_roster.artist_id, requested_roster.roster_slot) then
-        raise exception 'Offered artist does not fit the other roster slot';
-    end if;
+        if offered_roster.id is null then
+            raise exception 'You no longer have one of those artists on your roster';
+        end if;
+        if offered_first.id is null then
+            offered_first := offered_roster;
+        end if;
+        offered_payload := offered_payload || public.trade_item_payload(offered_roster);
+    end loop;
+
+    for item_name in select jsonb_array_elements_text(requested_artist_names)
+    loop
+        requested_roster := null;
+        select rosters.* into requested_roster
+        from public.rosters
+        join public.artists on artists.id = rosters.artist_id
+        where rosters.league_id = target_league_id
+        and rosters.user_id = recipient
+        and rosters.released_at is null
+        and lower(coalesce(artists.display_name, artists.normalized_name)) = lower(trim(item_name))
+        limit 1;
+
+        if requested_roster.id is null then
+            raise exception 'That member no longer has one of those artists';
+        end if;
+        if requested_first.id is null then
+            requested_first := requested_roster;
+        end if;
+        requested_payload := requested_payload || public.trade_item_payload(requested_roster);
+    end loop;
 
     insert into public.trade_offers (
         league_id,
@@ -1755,16 +1823,20 @@ begin
         offered_artist_id,
         requested_artist_id,
         offered_roster_slot,
-        requested_roster_slot
+        requested_roster_slot,
+        offered_items,
+        requested_items
     )
     values (
         target_league_id,
         proposer,
         recipient,
-        offered_roster.artist_id,
-        requested_roster.artist_id,
-        offered_roster.roster_slot,
-        requested_roster.roster_slot
+        offered_first.artist_id,
+        requested_first.artist_id,
+        offered_first.roster_slot,
+        requested_first.roster_slot,
+        offered_payload,
+        requested_payload
     )
     returning id into trade_id;
 
@@ -1781,7 +1853,7 @@ begin
 end;
 $$;
 
-grant execute on function public.create_trade_offer(uuid, text, text, text) to authenticated;
+grant execute on function public.create_trade_offer(uuid, text, jsonb, jsonb) to authenticated;
 
 drop function if exists public.respond_trade_offer(uuid, text);
 create or replace function public.respond_trade_offer(target_trade_id uuid, response text)
@@ -1795,6 +1867,13 @@ declare
     trade public.trade_offers%rowtype;
     offered_roster public.rosters%rowtype;
     requested_roster public.rosters%rowtype;
+    trade_item jsonb;
+    target_slot text;
+    available_proposer_slots text[];
+    available_recipient_slots text[];
+    used_proposer_slots text[] := '{}';
+    used_recipient_slots text[] := '{}';
+    target_artist_id uuid;
 begin
     if actor is null then
         raise exception 'Authentication required';
@@ -1841,43 +1920,135 @@ begin
         raise exception 'Unsupported trade response';
     end if;
 
-    select * into offered_roster
-    from public.rosters
-    where league_id = trade.league_id
-    and user_id = trade.proposer_id
-    and artist_id = trade.offered_artist_id
-    and released_at is null
-    for update;
+    select coalesce(array_agg(slot), '{}') into available_proposer_slots
+    from unnest(public.trade_active_slots(trade.league_id)) as slot
+    where slot not in (
+        select roster_slot from public.rosters
+        where league_id = trade.league_id
+        and user_id = trade.proposer_id
+        and released_at is null
+    );
 
-    select * into requested_roster
-    from public.rosters
-    where league_id = trade.league_id
-    and user_id = trade.recipient_id
-    and artist_id = trade.requested_artist_id
-    and released_at is null
-    for update;
+    select coalesce(array_agg(slot), '{}') into available_recipient_slots
+    from unnest(public.trade_active_slots(trade.league_id)) as slot
+    where slot not in (
+        select roster_slot from public.rosters
+        where league_id = trade.league_id
+        and user_id = trade.recipient_id
+        and released_at is null
+    );
 
-    if offered_roster.id is null or requested_roster.id is null then
-        update public.trade_offers set status = 'expired', responded_at = now() where id = trade.id;
-        raise exception 'One of these artists is no longer available for this trade';
-    end if;
-    if not public.artist_fits_roster_slot(trade.requested_artist_id, offered_roster.roster_slot) or
-       not public.artist_fits_roster_slot(trade.offered_artist_id, requested_roster.roster_slot) then
-        update public.trade_offers set status = 'expired', responded_at = now() where id = trade.id;
-        raise exception 'This trade no longer fits both rosters';
-    end if;
+    for trade_item in select jsonb_array_elements(trade.offered_items)
+    loop
+        target_artist_id := (trade_item->>'artist_id')::uuid;
+        select * into offered_roster
+        from public.rosters
+        where league_id = trade.league_id
+        and user_id = trade.proposer_id
+        and artist_id = target_artist_id
+        and released_at is null
+        for update;
 
-    update public.rosters
-    set user_id = trade.recipient_id,
-        roster_slot = requested_roster.roster_slot,
-        acquired_at = now()
-    where id = offered_roster.id;
+        if offered_roster.id is null then
+            update public.trade_offers set status = 'expired', responded_at = now() where id = trade.id;
+            raise exception 'One of these artists is no longer available for this trade';
+        end if;
+        available_recipient_slots := array_remove(available_recipient_slots, offered_roster.roster_slot);
+        available_proposer_slots := array_append(available_proposer_slots, offered_roster.roster_slot);
+    end loop;
 
-    update public.rosters
-    set user_id = trade.proposer_id,
-        roster_slot = offered_roster.roster_slot,
-        acquired_at = now()
-    where id = requested_roster.id;
+    for trade_item in select jsonb_array_elements(trade.requested_items)
+    loop
+        target_artist_id := (trade_item->>'artist_id')::uuid;
+        select * into requested_roster
+        from public.rosters
+        where league_id = trade.league_id
+        and user_id = trade.recipient_id
+        and artist_id = target_artist_id
+        and released_at is null
+        for update;
+
+        if requested_roster.id is null then
+            update public.trade_offers set status = 'expired', responded_at = now() where id = trade.id;
+            raise exception 'One of these artists is no longer available for this trade';
+        end if;
+        available_proposer_slots := array_remove(available_proposer_slots, requested_roster.roster_slot);
+        available_recipient_slots := array_append(available_recipient_slots, requested_roster.roster_slot);
+    end loop;
+
+    for trade_item in select jsonb_array_elements(trade.requested_items)
+    loop
+        target_artist_id := (trade_item->>'artist_id')::uuid;
+        target_slot := null;
+        select slot into target_slot
+        from unnest(available_proposer_slots) as slot
+        where slot <> all(used_proposer_slots)
+        and public.artist_fits_roster_slot(target_artist_id, slot)
+        limit 1;
+        if target_slot is null then
+            update public.trade_offers set status = 'expired', responded_at = now() where id = trade.id;
+            raise exception 'This trade no longer fits both rosters';
+        end if;
+        used_proposer_slots := array_append(used_proposer_slots, target_slot);
+    end loop;
+
+    for trade_item in select jsonb_array_elements(trade.offered_items)
+    loop
+        target_artist_id := (trade_item->>'artist_id')::uuid;
+        target_slot := null;
+        select slot into target_slot
+        from unnest(available_recipient_slots) as slot
+        where slot <> all(used_recipient_slots)
+        and public.artist_fits_roster_slot(target_artist_id, slot)
+        limit 1;
+        if target_slot is null then
+            update public.trade_offers set status = 'expired', responded_at = now() where id = trade.id;
+            raise exception 'This trade no longer fits both rosters';
+        end if;
+        used_recipient_slots := array_append(used_recipient_slots, target_slot);
+    end loop;
+
+    used_proposer_slots := '{}';
+    for trade_item in select jsonb_array_elements(trade.requested_items)
+    loop
+        target_artist_id := (trade_item->>'artist_id')::uuid;
+        target_slot := null;
+        select slot into target_slot
+        from unnest(available_proposer_slots) as slot
+        where slot <> all(used_proposer_slots)
+        and public.artist_fits_roster_slot(target_artist_id, slot)
+        limit 1;
+        used_proposer_slots := array_append(used_proposer_slots, target_slot);
+        update public.rosters
+        set user_id = trade.proposer_id,
+            roster_slot = target_slot,
+            acquired_at = now()
+        where league_id = trade.league_id
+        and user_id = trade.recipient_id
+        and artist_id = target_artist_id
+        and released_at is null;
+    end loop;
+
+    used_recipient_slots := '{}';
+    for trade_item in select jsonb_array_elements(trade.offered_items)
+    loop
+        target_artist_id := (trade_item->>'artist_id')::uuid;
+        target_slot := null;
+        select slot into target_slot
+        from unnest(available_recipient_slots) as slot
+        where slot <> all(used_recipient_slots)
+        and public.artist_fits_roster_slot(target_artist_id, slot)
+        limit 1;
+        used_recipient_slots := array_append(used_recipient_slots, target_slot);
+        update public.rosters
+        set user_id = trade.recipient_id,
+            roster_slot = target_slot,
+            acquired_at = now()
+        where league_id = trade.league_id
+        and user_id = trade.proposer_id
+        and artist_id = target_artist_id
+        and released_at is null;
+    end loop;
 
     update public.trade_offers set status = 'accepted', responded_at = now() where id = trade.id;
 
@@ -1902,6 +2073,8 @@ returns table (
     requested_image_url text,
     offered_roster_slot text,
     requested_roster_slot text,
+    offered_items jsonb,
+    requested_items jsonb,
     status text,
     created_at timestamptz,
     expires_at timestamptz,
@@ -1922,6 +2095,24 @@ as $$
         requested_artist.image_url as requested_image_url,
         trade_offers.offered_roster_slot,
         trade_offers.requested_roster_slot,
+        case
+            when jsonb_array_length(trade_offers.offered_items) > 0 then trade_offers.offered_items
+            else jsonb_build_array(jsonb_build_object(
+                'artist_id', offered_artist.id,
+                'name', coalesce(offered_artist.display_name, offered_artist.normalized_name),
+                'image_url', offered_artist.image_url,
+                'slot', trade_offers.offered_roster_slot
+            ))
+        end as offered_items,
+        case
+            when jsonb_array_length(trade_offers.requested_items) > 0 then trade_offers.requested_items
+            else jsonb_build_array(jsonb_build_object(
+                'artist_id', requested_artist.id,
+                'name', coalesce(requested_artist.display_name, requested_artist.normalized_name),
+                'image_url', requested_artist.image_url,
+                'slot', trade_offers.requested_roster_slot
+            ))
+        end as requested_items,
         case
             when trade_offers.status = 'pending' and trade_offers.expires_at <= now() then 'expired'
             else trade_offers.status

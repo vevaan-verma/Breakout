@@ -1085,6 +1085,7 @@ internal fun DraftEndedScreen(
 @Composable
 internal fun DraftSummaryScreen(
     league: LeagueUi,
+    account: AccountUi?,
     draftPicks: List<DraftPickUi>,
     refreshing: Boolean,
     onRefresh: () -> Unit,
@@ -1119,6 +1120,7 @@ internal fun DraftSummaryScreen(
                     round = round,
                     picks = picks,
                     memberCount = memberCount,
+                    account = account,
                     onArtistSelected = onArtistSelected
                 )
             }
@@ -1131,6 +1133,7 @@ internal fun DraftSummaryRoundCard(
     round: Int,
     picks: List<DraftPickUi>,
     memberCount: Int,
+    account: AccountUi?,
     onArtistSelected: (ArtistUi) -> Unit
 ) {
     val roundDuration = picks.sumOf { it.secondsToPick ?: 0 }
@@ -1175,6 +1178,7 @@ internal fun DraftSummaryRoundCard(
                 DraftSummaryPickTicket(
                     pick = pick,
                     roundPickNumber = ((pick.pickNumber - 1) % memberCount.coerceAtLeast(1)) + 1,
+                    isYou = pick.pickedBy.equals(account?.username.orEmpty(), ignoreCase = true),
                     onArtistSelected = { onArtistSelected(pick.artist) }
                 )
             }
@@ -1186,14 +1190,16 @@ internal fun DraftSummaryRoundCard(
 internal fun DraftSummaryPickTicket(
     pick: DraftPickUi,
     roundPickNumber: Int,
+    isYou: Boolean,
     onArtistSelected: () -> Unit
 ) {
+    val accent = if (isYou) WaiverAccent else BreakoutOutline
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(BreakoutDimensions.CardCornerRadius))
-            .background(BreakoutSurfaceVariant.copy(alpha = 0.5f))
-            .border(1.dp, BreakoutOutline.copy(alpha = 0.22f), RoundedCornerShape(BreakoutDimensions.CardCornerRadius))
+            .background(if (isYou) WaiverAccent.copy(alpha = 0.08f) else BreakoutSurfaceVariant.copy(alpha = 0.5f))
+            .border(1.dp, accent.copy(alpha = if (isYou) 0.58f else 0.22f), RoundedCornerShape(BreakoutDimensions.CardCornerRadius))
             .clickable(onClick = onArtistSelected)
             .padding(horizontal = BreakoutDimensions.sm, vertical = BreakoutDimensions.sm),
         horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm),
@@ -1216,7 +1222,14 @@ internal fun DraftSummaryPickTicket(
             verticalArrangement = Arrangement.spacedBy(3.dp)
         ) {
             Text(pick.artist.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(pick.pickedBy, color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                if (isYou) "You" else pick.pickedBy,
+                color = if (isYou) WaiverAccent else BreakoutTextSecondary,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (isYou) FontWeight.Black else FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
             Row(
                 horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.xs),
                 verticalAlignment = Alignment.CenterVertically

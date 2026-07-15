@@ -102,6 +102,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Image
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -127,12 +128,15 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -198,6 +202,7 @@ internal fun ArtistDetailScreen(
     draftedStatusLabel: String?,
     draftedHistoryLabel: String?,
     droppedAtMillis: Long?,
+    waiveredAtMillis: Long? = null,
     isWaiverQueued: Boolean,
     canAddToRoster: Boolean,
     canQueueWaiver: Boolean,
@@ -322,10 +327,11 @@ internal fun ArtistDetailScreen(
                     imageUrl = shownArtist.latestReleaseImageUrl
                 )
             }
-            if (draftedHistoryLabel != null || droppedAtMillis != null) {
+            if (draftedHistoryLabel != null || droppedAtMillis != null || waiveredAtMillis != null) {
                 ArtistHistoryTimelineCard(
                     draftedDetail = draftedHistoryLabel,
-                    droppedAtMillis = droppedAtMillis
+                    droppedAtMillis = droppedAtMillis,
+                    waiveredAtMillis = waiveredAtMillis
                 )
             }
             if (!canAddToRoster && draftStatus == DraftStatus.Live) {
@@ -357,7 +363,7 @@ internal fun ArtistDetailScreen(
                 added = isInRoster,
                 waiver = canQueueWaiver || isWaiverQueued,
                 waiverCancel = isWaiverQueued,
-                size = 56.dp,
+                size = 64.dp,
                 solid = true,
                 onClick = when {
                     isInRoster -> ({ confirmRemove = true })
@@ -577,6 +583,7 @@ internal fun LeagueDrawer(
     onLeagueNameChange: (String) -> Unit,
     onInviteCodeChange: (String) -> Unit,
     joinError: String?,
+    pendingTradeCount: Int = 0,
     onSwitchLeague: (LeagueUi) -> Unit,
     onCreateLeague: () -> Unit,
     onJoinLeague: () -> Unit,
@@ -587,6 +594,7 @@ internal fun LeagueDrawer(
     val focusManager = LocalFocusManager.current
     val drawerScrollState = rememberScrollState()
     var confirmLeave by rememberSaveable(activeLeague?.inviteCode) { mutableStateOf(false) }
+    var leagueActionMode by rememberSaveable { mutableStateOf<String?>(null) }
     val leaveActionText = when {
         activeLeague == null -> "Leave Current League"
         activeLeague.isManager && activeLeague.memberCount <= 1 -> "Delete League"
@@ -602,7 +610,7 @@ internal fun LeagueDrawer(
     }
 
     LaunchedEffect(drawerOpen) {
-        if (drawerOpen) drawerScrollState.scrollTo(0)
+        drawerScrollState.scrollTo(0)
     }
 
     ModalDrawerSheet(
@@ -623,10 +631,21 @@ internal fun LeagueDrawer(
         ) {
             BreakoutCard(
                 contentPadding = PaddingValues(BreakoutDimensions.HeroCardPadding),
-                border = BorderStroke(1.dp, BreakoutPrimary.copy(alpha = 0.38f))
+                border = BorderStroke(1.dp, BreakoutPrimary.copy(alpha = 0.42f))
             ) {
-                Text("Breakout", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
-                Text(activeLeague?.name ?: "Create or join a league", color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.md), verticalAlignment = Alignment.CenterVertically) {
+                    BreakoutMark(size = 58.dp)
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Breakout", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
+                        Text(
+                            activeLeague?.name ?: "Create or join a league",
+                            color = BreakoutTextSecondary,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
             }
             if (activeLeague != null) {
                 InviteCodeCard(
@@ -636,7 +655,7 @@ internal fun LeagueDrawer(
                 BreakoutCard {
                     Text("Navigate", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                     DrawerNavRow("League Settings", BreakoutTab.League, onNavigate)
-                    DrawerNavRow("Trades", BreakoutTab.Trades, onNavigate)
+                    DrawerNavRow("Trades", BreakoutTab.Trades, onNavigate, badgeCount = pendingTradeCount)
                     DrawerNavRow("All Matchups", BreakoutTab.AllMatchups, onNavigate)
                     if (activeLeague.draftStatus == DraftStatus.Complete) {
                         DrawerNavRow("Draft Summary", BreakoutTab.DraftSummary, onNavigate)
@@ -669,7 +688,48 @@ internal fun LeagueDrawer(
                 }
             }
             BreakoutCard {
-                Text("Leagues", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Column {
+                        Text("Leagues", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        Text("${leagues.size}/$MaxJoinedLeagues joined", color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(46.dp)
+                            .clip(CircleShape)
+                            .background(BreakoutPrimary.copy(alpha = 0.16f))
+                            .border(1.dp, BreakoutPrimary.copy(alpha = 0.42f), CircleShape)
+                            .clickable { leagueActionMode = if (leagueActionMode == "menu") null else "menu" },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("+", color = BreakoutPrimary, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                        if (leagueActionMode == "menu") {
+                            Popup(
+                                alignment = Alignment.TopEnd,
+                                offset = IntOffset(0, -132),
+                                onDismissRequest = { leagueActionMode = null },
+                                properties = PopupProperties(focusable = true)
+                            ) {
+                                Surface(
+                                    color = BreakoutSurface.copy(alpha = 0.98f),
+                                    shape = RoundedCornerShape(BreakoutDimensions.CardCornerRadius),
+                                    border = BorderStroke(1.dp, BreakoutPrimary.copy(alpha = 0.38f)),
+                                    tonalElevation = 8.dp
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .width(220.dp)
+                                            .padding(BreakoutDimensions.sm),
+                                        verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.xs)
+                                    ) {
+                                        DrawerActionChoice("Create new league") { leagueActionMode = "create" }
+                                        DrawerActionChoice("Join existing league") { leagueActionMode = "join" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if (leagues.isEmpty()) {
                     Text("Create a league to start drafting.", color = BreakoutTextSecondary)
                 } else {
@@ -682,46 +742,110 @@ internal fun LeagueDrawer(
                     }
                 }
             }
-            BreakoutCard {
-                Text("Create League", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        }
+    }
+    if (leagueActionMode == "create") {
+        LeagueActionDialog(
+            title = "Create League",
+            inputLabel = "League Name",
+            value = draftLeagueName,
+            onValueChange = onLeagueNameChange,
+            actionText = "Create League",
+            enabled = draftLeagueName.isNotBlank() && leagues.size < MaxJoinedLeagues,
+            error = joinError,
+            onDismiss = { leagueActionMode = null },
+            onAction = onCreateLeague
+        )
+    } else if (leagueActionMode == "join") {
+        LeagueActionDialog(
+            title = "Join League",
+            inputLabel = "Invite Code",
+            value = draftInviteCode,
+            onValueChange = { value -> onInviteCodeChange(value.uppercase().filter { it.isLetterOrDigit() }.take(6)) },
+            actionText = "Join League",
+            enabled = isValidInviteCode(draftInviteCode) && leagues.size < MaxJoinedLeagues,
+            error = joinError,
+            onDismiss = { leagueActionMode = null },
+            onAction = onJoinLeague
+        )
+    }
+}
+
+@Composable
+internal fun DrawerActionChoice(label: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(BreakoutDimensions.SmallCornerRadius))
+            .background(BreakoutSurfaceVariant.copy(alpha = 0.62f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = BreakoutDimensions.md, vertical = BreakoutDimensions.sm),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+        Text(">", color = BreakoutPrimary, fontWeight = FontWeight.Black)
+    }
+}
+
+@Composable
+internal fun LeagueActionDialog(
+    title: String,
+    inputLabel: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+    actionText: String,
+    enabled: Boolean,
+    error: String?,
+    onDismiss: () -> Unit,
+    onAction: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier
+                .padding(horizontal = BreakoutDimensions.lg)
+                .fillMaxWidth()
+                .widthIn(max = 430.dp)
+                .imePadding(),
+            color = Color(0xFF171B25),
+            shape = RoundedCornerShape(28.dp),
+            border = BorderStroke(1.dp, BreakoutPrimary.copy(alpha = 0.42f)),
+            tonalElevation = 12.dp
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(BreakoutDimensions.xl),
+                verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.md)
+            ) {
+                Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
                 StyledTextField(
-                    value = draftLeagueName,
-                    onValueChange = onLeagueNameChange,
-                    label = "League Name",
-                    maxLength = MaxLeagueNameLength
+                    value = value,
+                    onValueChange = onValueChange,
+                    label = inputLabel,
+                    maxLength = if (inputLabel == "League Name") MaxLeagueNameLength else 6,
+                    keyboardActions = KeyboardActions(onDone = { if (enabled) onAction() })
                 )
-                PrimaryButton(
-                    text = "Create League",
-                    enabled = draftLeagueName.isNotBlank(),
-                    onClick = onCreateLeague
-                )
-            }
-            BreakoutCard {
-                Text("Join League", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                StyledTextField(
-                    value = draftInviteCode,
-                    onValueChange = { value ->
-                        onInviteCodeChange(value.uppercase().filter { it.isLetterOrDigit() }.take(6))
-                    },
-                    label = "Invite Code",
-                    keyboardActions = KeyboardActions(onDone = {
-                        if (isValidInviteCode(draftInviteCode)) onJoinLeague()
-                    })
-                )
-                SecondaryButton(
-                    text = "Join League",
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = isValidInviteCode(draftInviteCode),
-                    onClick = onJoinLeague
-                )
-                AnimatedFeedbackText(message = cleanVisibleError(joinError), color = BreakoutCoral)
+                AnimatedFeedbackText(message = cleanVisibleError(error), color = BreakoutCoral)
+                Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)) {
+                    SecondaryButton("Cancel", modifier = Modifier.weight(1f), onClick = onDismiss)
+                    PrimaryButton(
+                        text = actionText,
+                        modifier = Modifier.weight(1f),
+                        enabled = enabled,
+                        onClick = onAction
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-internal fun DrawerNavRow(label: String, tab: BreakoutTab, onNavigate: (BreakoutTab) -> Unit) {
+internal fun DrawerNavRow(label: String, tab: BreakoutTab, onNavigate: (BreakoutTab) -> Unit, badgeCount: Int = 0) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -734,14 +858,27 @@ internal fun DrawerNavRow(label: String, tab: BreakoutTab, onNavigate: (Breakout
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(label, style = MaterialTheme.typography.titleMedium)
-        Box(
-            modifier = Modifier
-                .clip(CircleShape)
-                .background(BreakoutPrimary.copy(alpha = 0.14f))
-                .padding(horizontal = BreakoutDimensions.sm, vertical = BreakoutDimensions.xs),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(tab.mark, color = BreakoutPrimary, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+        Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.xs), verticalAlignment = Alignment.CenterVertically) {
+            if (badgeCount > 0) {
+                Box(
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clip(CircleShape)
+                        .background(BreakoutCoral),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(badgeCount.coerceAtMost(99).toString(), color = Color.White, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Black)
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .background(BreakoutPrimary.copy(alpha = 0.14f))
+                    .padding(horizontal = BreakoutDimensions.sm, vertical = BreakoutDimensions.xs),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(tab.mark, color = BreakoutPrimary, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+            }
         }
     }
 }
@@ -791,6 +928,18 @@ internal fun MenuButton(modifier: Modifier = Modifier, onClick: () -> Unit) {
             }
         }
     }
+}
+
+@Composable
+internal fun BreakoutMark(size: Dp) {
+    Image(
+        painter = painterResource(id = R.drawable.breakout_app_icon),
+        contentDescription = "Breakout",
+        modifier = Modifier
+            .size(size)
+            .clip(RoundedCornerShape(22.dp)),
+        contentScale = ContentScale.Crop
+    )
 }
 
 @Composable
@@ -965,7 +1114,7 @@ internal fun ArtistRow(
     var dragOffsetPx by remember { mutableStateOf(0f) }
     val actionButtonSize = 64.dp
     // Artist card swipe action spacing: button size, side gap, reveal distance, and elastic threshold.
-    val actionGutter = BreakoutDimensions.md
+    val actionGutter = BreakoutDimensions.xxs
     val hasPrimaryAction = onToggleRoster != null
     val revealWidth = actionButtonSize + actionGutter * 2
     val density = LocalDensity.current
@@ -2624,7 +2773,7 @@ internal fun scheduleDraftReminderNotifications(context: Context, league: League
             Intent(context, DraftReminderReceiver::class.java).apply {
                 putExtra(
                     DraftReminderTitleExtra,
-                    if (offsetMinutes == 0L) "Draft lobby open" else "Draft starts in $label"
+                    if (offsetMinutes == 0L) "${league.name}: Draft lobby open" else "${league.name}: Draft starts in $label"
                 )
                 putExtra(
                     DraftReminderMessageExtra,

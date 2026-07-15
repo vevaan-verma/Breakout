@@ -492,7 +492,7 @@ internal fun MarketScreen(
         AnimatedVisibility(
             modifier = Modifier.fillMaxSize(),
             visible = !initialMarketLoading && marketContentVisible,
-            enter = fadeIn() + slideInVertically { it / 12 },
+            enter = fadeIn(),
             exit = fadeOut()
         ) {
             LazyColumn(
@@ -704,7 +704,7 @@ internal fun MarketScreen(
         AnimatedVisibility(
             modifier = Modifier.fillMaxSize(),
             visible = initialMarketLoading,
-            enter = fadeIn() + slideInVertically { it / 12 },
+            enter = fadeIn(),
             exit = fadeOut()
         ) {
             MarketInitializingScreen(onOpenMenu = onOpenMenu)
@@ -772,4 +772,3 @@ internal fun MarketScreen(
         }
     }
 }
-

@@ -351,6 +351,7 @@ internal const val MaxUsernameLength = 24
 internal const val MinPasswordLength = 8
 internal const val MaxPasswordLength = 72
 internal const val MaxLeagueNameLength = 40
+internal const val MaxJoinedLeagues = 10
 internal const val ReleaseDraftLeadMinutes = 30L
 internal const val DebugDraftLeadMinutes = 1L
 internal const val DraftLobbyGraceSeconds = 300
@@ -506,15 +507,18 @@ internal data class TradeOfferUi(
     val id: String,
     val proposerUsername: String,
     val recipientUsername: String,
-    val offeredArtist: ArtistUi,
-    val requestedArtist: ArtistUi,
-    val offeredSlot: RosterSlot,
-    val requestedSlot: RosterSlot,
+    val offeredItems: List<TradeArtistItemUi>,
+    val requestedItems: List<TradeArtistItemUi>,
     val status: String,
     val createdAt: String,
     val expiresAt: String,
     val incoming: Boolean,
     val outgoing: Boolean
+)
+
+internal data class TradeArtistItemUi(
+    val artist: ArtistUi,
+    val slot: RosterSlot
 )
 
 internal data class ArtistUi(
@@ -2326,34 +2330,20 @@ internal object SupabaseLeagueService {
         val array = JSONArray(raw)
         List(array.length()) { index ->
             val item = array.getJSONObject(index)
-            val offeredName = item.optString("offered_artist_name", "Offered artist")
-            val requestedName = item.optString("requested_artist_name", "Requested artist")
-            val offeredSlot = RosterSlot.entries.firstOrNull { it.name == item.optString("offered_roster_slot") } ?: RosterSlot.BenchOne
-            val requestedSlot = RosterSlot.entries.firstOrNull { it.name == item.optString("requested_roster_slot") } ?: RosterSlot.BenchOne
             TradeOfferUi(
                 id = item.optString("id"),
                 proposerUsername = item.optString("proposer_username", "Member"),
                 recipientUsername = item.optString("recipient_username", "Member"),
-                offeredArtist = ArtistUi(
-                    id = null,
-                    name = offeredName,
-                    listeners = null,
-                    albumCount = null,
-                    imageUrl = item.optString("offered_image_url").ifBlank { null },
-                    source = "Trade",
-                    scoreStatus = "Trade offer"
+                offeredItems = item.optJSONArray("offered_items").toTradeItems(
+                    fallbackName = item.optString("offered_artist_name", "Offered artist"),
+                    fallbackImageUrl = item.optString("offered_image_url").ifBlank { null },
+                    fallbackSlot = item.optString("offered_roster_slot")
                 ),
-                requestedArtist = ArtistUi(
-                    id = null,
-                    name = requestedName,
-                    listeners = null,
-                    albumCount = null,
-                    imageUrl = item.optString("requested_image_url").ifBlank { null },
-                    source = "Trade",
-                    scoreStatus = "Trade offer"
+                requestedItems = item.optJSONArray("requested_items").toTradeItems(
+                    fallbackName = item.optString("requested_artist_name", "Requested artist"),
+                    fallbackImageUrl = item.optString("requested_image_url").ifBlank { null },
+                    fallbackSlot = item.optString("requested_roster_slot")
                 ),
-                offeredSlot = offeredSlot,
-                requestedSlot = requestedSlot,
                 status = item.optString("status", "pending"),
                 createdAt = item.optString("created_at"),
                 expiresAt = item.optString("expires_at"),
@@ -2367,8 +2357,8 @@ internal object SupabaseLeagueService {
         accessToken: String,
         leagueId: String,
         targetUsername: String,
-        offeredArtistName: String,
-        requestedArtistName: String
+        offeredArtistNames: List<String>,
+        requestedArtistNames: List<String>
     ): Result<String> = runCatching {
         if (accessToken.isBlank() || leagueId.isBlank() || !isOnlinePlayConfigured()) error("Sign in again to send trades.")
         requestText(
@@ -2378,8 +2368,8 @@ internal object SupabaseLeagueService {
             body = JSONObject()
                 .put("target_league_id", leagueId)
                 .put("target_username", targetUsername)
-                .put("offered_artist_name", offeredArtistName)
-                .put("requested_artist_name", requestedArtistName)
+                .put("offered_artist_names", JSONArray(offeredArtistNames))
+                .put("requested_artist_names", JSONArray(requestedArtistNames))
                 .toString()
         ).trim('"')
     }
@@ -2642,6 +2632,52 @@ internal object SupabaseLeagueService {
         }
 }
 
+private fun JSONArray?.toTradeItems(
+    fallbackName: String,
+    fallbackImageUrl: String?,
+    fallbackSlot: String
+): List<TradeArtistItemUi> {
+    if (this == null || length() == 0) {
+        val slot = RosterSlot.entries.firstOrNull { it.name == fallbackSlot } ?: RosterSlot.BenchOne
+        return listOf(
+            TradeArtistItemUi(
+                artist = ArtistUi(
+                    id = null,
+                    name = fallbackName,
+                    listeners = null,
+                    albumCount = null,
+                    imageUrl = fallbackImageUrl,
+                    source = "Trade",
+                    scoreStatus = "Trade offer"
+                ),
+                slot = slot
+            )
+        )
+    }
+    return List(length()) { index ->
+        val item = optJSONObject(index) ?: JSONObject()
+        val slot = RosterSlot.entries.firstOrNull { it.name == item.optString("slot") } ?: RosterSlot.BenchOne
+        TradeArtistItemUi(
+            artist = ArtistUi(
+                id = null,
+                name = item.optString("name", "Trade artist"),
+                listeners = null,
+                albumCount = null,
+                imageUrl = item.optString("image_url").ifBlank { null },
+                source = "Trade",
+                scoreStatus = "Trade offer"
+            ),
+            slot = slot
+        )
+    }
+}
+
+private fun List<TradeArtistItemUi>.tradeItemSummary(): String = when (size) {
+    0 -> "no artists"
+    1 -> first().artist.name
+    else -> "$size artists"
+}
+
 internal object LocalBreakoutStore {
     private const val FileName = "breakout_state"
     private const val LeaguesKey = "leagues"
@@ -2650,6 +2686,7 @@ internal object LocalBreakoutStore {
     private const val WaiversKey = "waivers"
     private const val DroppedArtistsKey = "dropped_artists"
     private const val DroppedArtistDatesKey = "dropped_artist_dates"
+    private const val WaiveredArtistDatesKey = "waivered_artist_dates"
     private const val SnapshotsKey = "snapshots"
     private const val AccountKey = "account"
 
@@ -2755,6 +2792,9 @@ internal object LocalBreakoutStore {
     private fun droppedArtistDatesStorageKey(leagueKey: String?): String =
         leagueKey?.takeIf { it.isNotBlank() }?.let { "$DroppedArtistDatesKey:$it" } ?: DroppedArtistDatesKey
 
+    private fun waiveredArtistDatesStorageKey(leagueKey: String?): String =
+        leagueKey?.takeIf { it.isNotBlank() }?.let { "$WaiveredArtistDatesKey:$it" } ?: WaiveredArtistDatesKey
+
     fun loadRoster(context: Context, leagueKey: String? = null): Map<RosterSlot, ArtistUi> {
         val raw = prefs(context).getString(rosterStorageKey(leagueKey), "[]").orEmpty()
         return runCatching {
@@ -2839,12 +2879,27 @@ internal object LocalBreakoutStore {
         prefs(context).edit().putString(droppedArtistDatesStorageKey(leagueKey), item.toString()).apply()
     }
 
+    fun loadWaiveredArtistDates(context: Context, leagueKey: String? = null): Map<String, Long> {
+        val raw = prefs(context).getString(waiveredArtistDatesStorageKey(leagueKey), "{}").orEmpty()
+        return runCatching {
+            val item = JSONObject(raw.ifBlank { "{}" })
+            item.keys().asSequence().associateWith { key -> item.optLong(key) }
+        }.getOrDefault(emptyMap())
+    }
+
+    fun saveWaiveredArtistDates(context: Context, dates: Map<String, Long>, leagueKey: String? = null) {
+        val item = JSONObject()
+        dates.forEach { (name, date) -> item.put(name, date) }
+        prefs(context).edit().putString(waiveredArtistDatesStorageKey(leagueKey), item.toString()).apply()
+    }
+
     fun clearLeagueState(context: Context, leagueKey: String) {
         prefs(context).edit()
             .remove(rosterStorageKey(leagueKey))
             .remove(waiverStorageKey(leagueKey))
             .remove(droppedArtistsStorageKey(leagueKey))
             .remove(droppedArtistDatesStorageKey(leagueKey))
+            .remove(waiveredArtistDatesStorageKey(leagueKey))
             .apply()
     }
 
@@ -3044,11 +3099,14 @@ internal fun BreakoutApp(
     var draftPresenceByLeagueId by remember { mutableStateOf<Map<String, DraftPresenceUi>>(emptyMap()) }
     var droppedArtistsByLeagueId by remember { mutableStateOf<Map<String, Set<String>>>(emptyMap()) }
     var droppedArtistDatesByLeagueId by remember { mutableStateOf<Map<String, Map<String, Long>>>(emptyMap()) }
+    var waiveredArtistDatesByLeagueId by remember { mutableStateOf<Map<String, Map<String, Long>>>(emptyMap()) }
     var preloadedMarketArtists by remember { mutableStateOf<List<ArtistUi>?>(null) }
     var managerStatusByLeagueId by remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
     var startupLoading by remember { mutableStateOf(true) }
     var startupProgress by remember { mutableStateOf(0f) }
     var startupMessage by remember { mutableStateOf("Opening Breakout") }
+    var leagueSwitchLoading by remember { mutableStateOf(false) }
+    var leagueSwitchMessage by remember { mutableStateOf("Loading league") }
     var pendingDraftExitTab by remember { mutableStateOf<BreakoutTab?>(null) }
     var navigationRefreshTick by remember { mutableStateOf(0) }
     var restoreRosterMemberUsername by rememberSaveable { mutableStateOf<String?>(null) }
@@ -3144,6 +3202,7 @@ internal fun BreakoutApp(
                 draftPresenceByLeagueId = draftPresenceByLeagueId - removedId
                 droppedArtistsByLeagueId = droppedArtistsByLeagueId - removedId
                 droppedArtistDatesByLeagueId = droppedArtistDatesByLeagueId - removedId
+                waiveredArtistDatesByLeagueId = waiveredArtistDatesByLeagueId - removedId
                 LocalBreakoutStore.clearLeagueState(context, removedId)
             }
         }
@@ -3309,7 +3368,7 @@ internal fun BreakoutApp(
                     Toast.makeText(context, "Draft delayed ${DraftLobbyDelayMinutes} minutes while members join.", Toast.LENGTH_LONG).show()
                     showDraftSystemNotification(
                         context = context,
-                        title = "Draft delayed",
+                        title = "${target.name}: Draft delayed",
                         message = "${target.name} will wait for more members before starting.",
                         notificationId = target.id.hashCode() + 7
                     )
@@ -3323,6 +3382,10 @@ internal fun BreakoutApp(
     fun createLeague(name: String) {
         val cleanedName = name.trim()
         if (cleanedName.isBlank()) return
+        if (leagues.size >= MaxJoinedLeagues) {
+            joinError = "You can join up to $MaxJoinedLeagues leagues."
+            return
+        }
         val inviteCode = generateInviteCode()
         scope.launch {
             val currentAccount = currentOnlineAccount()
@@ -3363,6 +3426,10 @@ internal fun BreakoutApp(
 
     fun joinLeague(code: String) {
         val cleanedCode = code.trim().uppercase()
+        if (leagues.size >= MaxJoinedLeagues) {
+            joinError = "You can join up to $MaxJoinedLeagues leagues."
+            return
+        }
         if (!isValidInviteCode(cleanedCode)) {
             joinError = "Invite codes must be exactly 6 characters."
             return
@@ -3635,8 +3702,8 @@ internal fun BreakoutApp(
                                 newIncoming.firstOrNull()?.let { offer ->
                                     showDraftSystemNotification(
                                         context = context,
-                                        title = "New trade offer",
-                                        message = "${offer.proposerUsername} offered ${offer.offeredArtist.name} for ${offer.requestedArtist.name}.",
+                                        title = "${league?.name ?: "Breakout"} trade offer",
+                                        message = "${offer.proposerUsername} offered ${offer.offeredItems.tradeItemSummary()} for ${offer.requestedItems.tradeItemSummary()}.",
                                         notificationId = offer.id.hashCode()
                                     )
                                 }
@@ -3786,8 +3853,8 @@ internal fun BreakoutApp(
                     newIncoming.firstOrNull()?.let { offer ->
                         showDraftSystemNotification(
                             context = context,
-                            title = "New trade offer",
-                            message = "${offer.proposerUsername} offered ${offer.offeredArtist.name} for ${offer.requestedArtist.name}.",
+                            title = "${target.name} trade offer",
+                            message = "${offer.proposerUsername} offered ${offer.offeredItems.tradeItemSummary()} for ${offer.requestedItems.tradeItemSummary()}.",
                             notificationId = offer.id.hashCode()
                         )
                     }
@@ -3874,10 +3941,14 @@ internal fun BreakoutApp(
             }
             SupabaseLeagueService.loadDraftPicks(current.accessToken, activeAfterLoad.id).onSuccess { picks ->
                 draftPicksByLeagueId = draftPicksByLeagueId + (activeAfterLoad.id to picks)
+                prefetchArtistImages(context, picks.map { it.artist }, limit = 180)
             }
             SupabaseLeagueService.loadTradeOffers(current.accessToken, activeAfterLoad.id).onSuccess { offers ->
                 tradeOffersByLeagueId = tradeOffersByLeagueId + (activeAfterLoad.id to offers)
             }
+        } else if (activeAfterLoad != null) {
+            val key = activeAfterLoad.id.ifBlank { activeAfterLoad.inviteCode }
+            prefetchArtistImages(context, LocalBreakoutStore.loadRoster(context, key).values.toList(), limit = 80)
         }
 
         startupStep(1f, "Opening your league")
@@ -3939,8 +4010,8 @@ internal fun BreakoutApp(
                             newIncoming.firstOrNull()?.let { offer ->
                                 showDraftSystemNotification(
                                     context = context,
-                                    title = "New trade offer",
-                                    message = "${offer.proposerUsername} offered ${offer.offeredArtist.name} for ${offer.requestedArtist.name}.",
+                                    title = "${remoteLeagues.firstOrNull { it.id == leagueId }?.name ?: "Breakout"} trade offer",
+                                    message = "${offer.proposerUsername} offered ${offer.offeredItems.tradeItemSummary()} for ${offer.requestedItems.tradeItemSummary()}.",
                                     notificationId = offer.id.hashCode()
                                 )
                             }
@@ -3976,9 +4047,11 @@ internal fun BreakoutApp(
         val leagueKey = league?.id?.ifBlank { league?.inviteCode.orEmpty() }
         roster = leagueKey?.let { LocalBreakoutStore.loadRoster(context, it) } ?: emptyMap()
         waiverClaims = leagueKey?.let { LocalBreakoutStore.loadWaiverClaims(context, it) } ?: emptyList()
+        prefetchArtistImages(context, roster.values.toList(), limit = 80)
         leagueKey?.let { key ->
             droppedArtistsByLeagueId = droppedArtistsByLeagueId + (key to LocalBreakoutStore.loadDroppedArtists(context, key))
             droppedArtistDatesByLeagueId = droppedArtistDatesByLeagueId + (key to LocalBreakoutStore.loadDroppedArtistDates(context, key))
+            waiveredArtistDatesByLeagueId = waiveredArtistDatesByLeagueId + (key to LocalBreakoutStore.loadWaiveredArtistDates(context, key))
         }
     }
 
@@ -4001,6 +4074,13 @@ internal fun BreakoutApp(
         league?.let { active ->
             val key = active.id.ifBlank { active.inviteCode }
             LocalBreakoutStore.saveDroppedArtistDates(context, droppedArtistDatesByLeagueId[key].orEmpty(), key)
+        }
+    }
+
+    LaunchedEffect(league?.id, waiveredArtistDatesByLeagueId) {
+        league?.let { active ->
+            val key = active.id.ifBlank { active.inviteCode }
+            LocalBreakoutStore.saveWaiveredArtistDates(context, waiveredArtistDatesByLeagueId[key].orEmpty(), key)
         }
     }
 
@@ -4113,13 +4193,42 @@ internal fun BreakoutApp(
                     joinError = null
                 },
                 joinError = joinError,
+                pendingTradeCount = league?.id?.let { leagueId ->
+                    tradeOffersByLeagueId[leagueId].orEmpty().count { it.incoming && it.status == "pending" }
+                } ?: 0,
                 onSwitchLeague = { selected ->
                     closeDraftRoomWithAutoPick()
-                    activeLeagueCode = selected.inviteCode
-                    joinError = null
-                    selectedTab = BreakoutTab.Home
-                    navigationRefreshTick++
-                    scope.launch { drawerState.close() }
+                    scope.launch {
+                        drawerState.close()
+                        leagueSwitchMessage = "Loading ${selected.name}"
+                        leagueSwitchLoading = true
+                        activeLeagueCode = selected.inviteCode
+                        joinError = null
+                        selectedTab = BreakoutTab.Home
+                        val leagueKey = selected.id.ifBlank { selected.inviteCode }
+                        roster = LocalBreakoutStore.loadRoster(context, leagueKey)
+                        waiverClaims = LocalBreakoutStore.loadWaiverClaims(context, leagueKey)
+                        droppedArtistsByLeagueId = droppedArtistsByLeagueId + (leagueKey to LocalBreakoutStore.loadDroppedArtists(context, leagueKey))
+                        droppedArtistDatesByLeagueId = droppedArtistDatesByLeagueId + (leagueKey to LocalBreakoutStore.loadDroppedArtistDates(context, leagueKey))
+                        waiveredArtistDatesByLeagueId = waiveredArtistDatesByLeagueId + (leagueKey to LocalBreakoutStore.loadWaiveredArtistDates(context, leagueKey))
+                        val current = currentOnlineAccount()?.takeIf { it.accessToken.isNotBlank() }
+                        if (current != null && selected.id.isNotBlank()) {
+                            SupabaseLeagueService.loadMembers(current.accessToken, selected.id).onSuccess { loadedMembers ->
+                                leagueMembersById = leagueMembersById + (selected.id to loadedMembers)
+                            }
+                            SupabaseLeagueService.loadDraftPicks(current.accessToken, selected.id).onSuccess { picks ->
+                                draftPicksByLeagueId = draftPicksByLeagueId + (selected.id to picks)
+                                prefetchArtistImages(context, picks.map { it.artist }, limit = 180)
+                            }
+                            SupabaseLeagueService.loadTradeOffers(current.accessToken, selected.id).onSuccess { offers ->
+                                tradeOffersByLeagueId = tradeOffersByLeagueId + (selected.id to offers)
+                            }
+                        }
+                        prefetchArtistImages(context, roster.values.toList(), limit = 80)
+                        navigationRefreshTick++
+                        delay(220)
+                        leagueSwitchLoading = false
+                    }
                 },
                 onCreateLeague = { createLeague(draftLeagueName) },
                 onJoinLeague = { joinLeague(draftInviteCode) },
@@ -4135,7 +4244,7 @@ internal fun BreakoutApp(
         Scaffold(
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
             bottomBar = {
-                if (!startupLoading && league != null && hasUsableAccount && selectedArtist == null) {
+                if (!startupLoading && !leagueSwitchLoading && league != null && hasUsableAccount && selectedArtist == null) {
                     BreakoutBottomNavigation(
                         selectedTab = selectedTab,
                         onTabSelected = {
@@ -4154,6 +4263,8 @@ internal fun BreakoutApp(
                 val activeLeague = league
                 if (startupLoading) {
                     AppStartupLoadingScreen(progress = startupProgress, message = startupMessage)
+                } else if (leagueSwitchLoading) {
+                    AppStartupLoadingScreen(progress = 0.82f, message = leagueSwitchMessage)
                 } else if (requiresOnlineAccount && authGate == AuthGate.Checking) {
                     AuthCheckingScreen()
                 } else if (requiresOnlineAccount && !hasUsableAccount) {
@@ -4408,6 +4519,7 @@ internal fun BreakoutApp(
                             },
                             onRunWaivers = {
                                 var updatedRoster = visibleRoster
+                                var awardedWaivers = emptySet<String>()
                                 waiverClaims.forEach { claim ->
                                     if (updatedRoster.values.none { it.name == claim.artist.name }) {
                                         claim.dropSlot?.let { dropSlot ->
@@ -4415,8 +4527,15 @@ internal fun BreakoutApp(
                                         }
                                         firstOpenSlotFor(claim.artist, updatedRoster, activeLeague.settings)?.let { slot ->
                                             updatedRoster = updatedRoster + (slot to claim.artist)
+                                            awardedWaivers = awardedWaivers + claim.artist.name.lowercase()
                                         }
                                     }
+                                }
+                                if (awardedWaivers.isNotEmpty()) {
+                                    val now = System.currentTimeMillis()
+                                    waiveredArtistDatesByLeagueId = waiveredArtistDatesByLeagueId + (
+                                        activeLeague.id to (waiveredArtistDatesByLeagueId[activeLeague.id].orEmpty() + awardedWaivers.associateWith { now })
+                                    )
                                 }
                                 roster = updatedRoster
                                 waiverClaims = emptyList()
@@ -4473,6 +4592,7 @@ internal fun BreakoutApp(
                         )
                         BreakoutTab.DraftSummary -> DraftSummaryScreen(
                             league = activeLeague,
+                            account = account,
                             draftPicks = draftPicksByLeagueId[activeLeague.id].orEmpty(),
                             refreshing = refreshingLeagueData,
                             onRefresh = ::refreshRemoteLeagues,
@@ -4507,6 +4627,7 @@ internal fun BreakoutApp(
                             },
                             onRunWaivers = {
                                 var updatedRoster = visibleRoster
+                                var awardedWaivers = emptySet<String>()
                                 waiverClaims.forEach { claim ->
                                     if (updatedRoster.values.none { it.name == claim.artist.name }) {
                                         claim.dropSlot?.let { dropSlot ->
@@ -4514,8 +4635,15 @@ internal fun BreakoutApp(
                                         }
                                         firstOpenSlotFor(claim.artist, updatedRoster, activeLeague.settings)?.let { slot ->
                                             updatedRoster = updatedRoster + (slot to claim.artist)
+                                            awardedWaivers = awardedWaivers + claim.artist.name.lowercase()
                                         }
                                     }
+                                }
+                                if (awardedWaivers.isNotEmpty()) {
+                                    val now = System.currentTimeMillis()
+                                    waiveredArtistDatesByLeagueId = waiveredArtistDatesByLeagueId + (
+                                        activeLeague.id to (waiveredArtistDatesByLeagueId[activeLeague.id].orEmpty() + awardedWaivers.associateWith { now })
+                                    )
                                 }
                                 roster = updatedRoster
                                 waiverClaims = emptyList()
@@ -4537,7 +4665,7 @@ internal fun BreakoutApp(
                                 loadTradesForLeague(activeLeague, force = true)
                             },
                             onOpenMenu = { scope.launch { drawerState.open() } },
-                            onSendTrade = { member, _, offeredArtist, _, requestedArtist ->
+                            onSendTrade = { member, offeredItems, requestedItems ->
                                 scope.launch {
                                     val current = currentOnlineAccount()?.takeIf { it.accessToken.isNotBlank() }
                                     if (current == null) {
@@ -4548,13 +4676,13 @@ internal fun BreakoutApp(
                                         accessToken = current.accessToken,
                                         leagueId = activeLeague.id,
                                         targetUsername = member.username,
-                                        offeredArtistName = offeredArtist.name,
-                                        requestedArtistName = requestedArtist.name
+                                        offeredArtistNames = offeredItems.map { it.artist.name },
+                                        requestedArtistNames = requestedItems.map { it.artist.name }
                                     ).onSuccess {
                                         showDraftSystemNotification(
                                             context = context,
-                                            title = "Trade sent",
-                                            message = "You offered ${offeredArtist.name} for ${requestedArtist.name}.",
+                                            title = "${activeLeague.name}: Trade sent",
+                                            message = "You offered ${offeredItems.tradeItemSummary()} for ${requestedItems.tradeItemSummary()}.",
                                             notificationId = it.hashCode()
                                         )
                                         loadTradesForLeague(activeLeague, force = true)
@@ -4574,8 +4702,8 @@ internal fun BreakoutApp(
                                         .onSuccess {
                                             showDraftSystemNotification(
                                                 context = context,
-                                                title = "Trade accepted",
-                                                message = "Your roster now includes ${offer.offeredArtist.name}.",
+                                                title = "${activeLeague.name}: Trade accepted",
+                                                message = "Your roster was updated with ${offer.offeredItems.tradeItemSummary()}.",
                                                 notificationId = offer.id.hashCode() + 11
                                             )
                                             refreshRemoteLeagues()
@@ -4594,7 +4722,7 @@ internal fun BreakoutApp(
                                         .onSuccess {
                                             showDraftSystemNotification(
                                                 context = context,
-                                                title = "Trade declined",
+                                                title = "${activeLeague.name}: Trade declined",
                                                 message = "You declined ${offer.proposerUsername}'s offer.",
                                                 notificationId = offer.id.hashCode() + 12
                                             )
@@ -4613,7 +4741,7 @@ internal fun BreakoutApp(
                                         .onSuccess {
                                             showDraftSystemNotification(
                                                 context = context,
-                                                title = "Trade canceled",
+                                                title = "${activeLeague.name}: Trade canceled",
                                                 message = "Your trade offer was canceled.",
                                                 notificationId = offer.id.hashCode() + 13
                                             )
@@ -4686,6 +4814,9 @@ internal fun BreakoutApp(
                             .firstOrNull { it.artist.name.equals(artist.name, ignoreCase = true) }
                         val draftedPick = originalDraftedPick?.takeUnless { artist.name.lowercase() in droppedNames }
                         val droppedAt = droppedArtistDatesByLeagueId[activeLeague.id].orEmpty()[artist.name.lowercase()]
+                        val waiveredAt = waiveredArtistDatesByLeagueId[activeLeague.id].orEmpty()[artist.name.lowercase()]
+                        fun displayUser(username: String): String =
+                            if (username.equals(account?.username.orEmpty(), ignoreCase = true)) "You" else username
                         Surface(
                             modifier = Modifier.fillMaxSize(),
                             color = MaterialTheme.colorScheme.background
@@ -4696,12 +4827,13 @@ internal fun BreakoutApp(
                                 draftStatus = activeLeague.draftStatus,
                                 weeklyPoints = weeklyPointsForArtist(artist, activeLeague),
                                 draftedStatusLabel = draftedPick?.let {
-                                    "Drafted by ${it.pickedBy} in Round ${((it.pickNumber - 1) / activeLeague.memberCount.coerceAtLeast(1)) + 1}, Pick ${it.pickNumber}"
+                                    "Drafted by ${displayUser(it.pickedBy)} in Round ${((it.pickNumber - 1) / activeLeague.memberCount.coerceAtLeast(1)) + 1}, Pick ${it.pickNumber}"
                                 },
                                 draftedHistoryLabel = originalDraftedPick?.let {
-                                    "Drafted by ${it.pickedBy} in Round ${((it.pickNumber - 1) / activeLeague.memberCount.coerceAtLeast(1)) + 1}, Pick ${it.pickNumber}"
+                                    "Drafted by ${displayUser(it.pickedBy)} in Round ${((it.pickNumber - 1) / activeLeague.memberCount.coerceAtLeast(1)) + 1}, Pick ${it.pickNumber}"
                                 },
                                 droppedAtMillis = droppedAt,
+                                waiveredAtMillis = waiveredAt,
                                 isWaiverQueued = waiverClaims.any { it.artist.name == artist.name },
                                 canAddToRoster = !selectedArtistReadOnly &&
                                     activeDraftRoomOpen &&

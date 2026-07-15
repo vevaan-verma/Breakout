@@ -830,10 +830,12 @@ internal fun StreamSplitCard(artist: ArtistUi) {
 @Composable
 internal fun ArtistHistoryTimelineCard(
     draftedDetail: String?,
-    droppedAtMillis: Long?
+    droppedAtMillis: Long?,
+    waiveredAtMillis: Long? = null
 ) {
     val events = buildList {
         draftedDetail?.let { add(Triple("Drafted", it.removePrefix("Drafted by "), BreakoutPrimary)) }
+        waiveredAtMillis?.let { add(Triple("Waivered", it.formatLocalDateTime(), WaiverAccent)) }
         droppedAtMillis?.let { add(Triple("Dropped", it.formatLocalDateTime(), BreakoutCoral)) }
     }
     if (events.isEmpty()) return
