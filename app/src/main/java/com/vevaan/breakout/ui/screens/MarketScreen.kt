@@ -261,6 +261,7 @@ internal fun MarketScreen(
     var searchLoadingVisible by remember { mutableStateOf(false) }
     var restoredScrollKey by remember { mutableStateOf<String?>(null) }
     var scrollSavingEnabledKey by remember { mutableStateOf<String?>(null) }
+    var emptyStateAllowedKey by remember { mutableStateOf<String?>(null) }
     val effectiveQuery = submittedSearch.trim()
     val dataKey = effectiveQuery.lowercase()
     val filterKey = "${dataKey}|${activeFilter?.name ?: "search"}"
@@ -464,6 +465,16 @@ internal fun MarketScreen(
     val transitioningArtistRows = displayedState is MarketState.Ready && !rowsReadyForCurrentKey
     val initialMarketLoading = effectiveQuery.isBlank() && displayedState is MarketState.Loading
 
+    LaunchedEffect(visibleRowsKey, allFilteredArtists.size, displayedState) {
+        emptyStateAllowedKey = null
+        if (displayedState is MarketState.Ready && allFilteredArtists.isEmpty()) {
+            delay(360)
+            if (visibleArtistListKey == visibleRowsKey || visibleArtistRows.isEmpty()) {
+                emptyStateAllowedKey = visibleRowsKey
+            }
+        }
+    }
+
     LaunchedEffect(visibleRowsKey, displayedState) {
         if (displayedState !is MarketState.Ready) {
             visibleArtistRows = emptyList()
@@ -478,17 +489,15 @@ internal fun MarketScreen(
             val savedScroll = savedScrollForCurrentKey
             val neededCount = restoredVisibleCount
             onVisibleCountChange(neededCount.coerceAtLeast(MarketInitialPageSize))
-            if (lastMarketKey != visibleRowsKey) {
-                if (savedScroll != null) {
-                    listState.animateScrollToItem(savedScroll.first, savedScroll.second)
-                } else {
-                    listState.smoothMarketScrollToTop()
-                }
-            }
             val firstRows = allFilteredArtists.take(neededCount.coerceAtLeast(MarketInitialPageSize))
             visibleArtistRows = firstRows
             visibleArtistListKey = visibleRowsKey
             animatingArtistKeys = firstRows.map { it.stableListKey() }.toSet()
+            if (savedScroll != null) {
+                listState.scrollToItem(savedScroll.first, savedScroll.second)
+            } else if (lastMarketKey != visibleRowsKey) {
+                listState.smoothMarketScrollToTop()
+            }
             delay(180)
             artistListVisible = true
             scrollSavingEnabledKey = scrollMemoryKey
@@ -514,7 +523,9 @@ internal fun MarketScreen(
             restoredScrollKey = scrollMemoryKey
             scrollPositions[scrollMemoryKey].parseScrollPosition()?.let { (index, offset) ->
                 delay(80)
-                listState.animateScrollToItem(index, offset)
+                if (visibleArtistListKey == visibleRowsKey) {
+                    listState.scrollToItem(index, offset)
+                }
             }
             scrollSavingEnabledKey = scrollMemoryKey
         }
@@ -822,7 +833,7 @@ internal fun MarketScreen(
                                 targetState = when {
                                     searchStillSettling -> "searching"
                                     transitioningArtistRows -> "spacer"
-                                    rowsReadyForCurrentKey && allFilteredArtists.isEmpty() -> "empty"
+                                    rowsReadyForCurrentKey && allFilteredArtists.isEmpty() && emptyStateAllowedKey == visibleRowsKey -> "empty"
                                     else -> "spacer"
                                 },
                                 animationSpec = tween(durationMillis = 220),

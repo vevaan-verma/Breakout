@@ -812,24 +812,27 @@ async function fillMissingPastspotArtwork(artist: MarketArtist): Promise<MarketA
 }
 
 async function loadPastspotSearchBasics(name: string): Promise<Pick<MarketArtist, "spotify_id" | "image_url" | "provider_url" | "current_listeners"> | null> {
-  const html = await fetchText(`https://pastspot.com/search?q=${encodeURIComponent(name)}`);
-  const cardMatches = [...html.matchAll(/<a[^>]+href="\/artists\/([^"?]+)(?:\?[^"]*)?"[\s\S]{0,2600}?<\/a>/gi)];
-  const candidates = cardMatches.map((match) => {
-    const block = match[0] ?? "";
-    const image = firstMatch(block, /<img[^>]+src="([^"]+)"/i);
-    const alt = firstMatch(block, /<img[^>]+alt="([^"]*)"/i);
-    const listenersText =
-      firstMatch(block, /([0-9][0-9,]*)\s*(?:monthly\s*)?listeners/i) ??
-      firstMatch(block, /aria-label="[^"]*listeners[^"]*?([0-9][0-9,]*)/i) ??
-      firstMatch(block, />([0-9][0-9,]*)<\/[^>]+>\s*<\/[^>]+>\s*<\/[^>]+>/i);
-    return {
-      spotify_id: match[1] || null,
-      image_url: image ? htmlDecode(image) : null,
-      display_name: cleanText(alt ?? ""),
-      current_listeners: parseInteger(listenersText ?? undefined),
-      provider_url: match[1] ? `https://pastspot.com/artists/${match[1]}` : null,
-    };
-  }).filter((candidate) => candidate.spotify_id && (candidate.image_url || candidate.current_listeners != null));
+  const response = await fetch(`https://pastspot.com/api/search?q=${encodeURIComponent(name)}`, {
+    signal: AbortSignal.timeout(FetchTimeoutMs),
+    headers: { "User-Agent": "BreakoutFantasy/1.0" },
+  });
+  if (!response.ok) return null;
+  const payload = await response.json().catch(() => null) as { artists?: unknown[] } | null;
+  const candidates = (payload?.artists ?? [])
+    .map((entry) => entry && typeof entry === "object" ? entry as Record<string, unknown> : null)
+    .filter((entry): entry is Record<string, unknown> => entry != null)
+    .map((entry) => {
+      const spotifyId = stringFromUnknown(entry.spotifyId) ?? stringFromUnknown(entry.spotify_id);
+      const displayName = stringFromUnknown(entry.name) ?? "";
+      return {
+        spotify_id: spotifyId,
+        image_url: stringFromUnknown(entry.imageUrl) ?? stringFromUnknown(entry.image_url),
+        display_name: cleanText(displayName),
+        current_listeners: numberFromUnknown(entry.monthlyListeners ?? entry.monthly_listeners),
+        provider_url: spotifyId ? `https://pastspot.com/artists/${spotifyId}` : null,
+      };
+    })
+    .filter((candidate) => candidate.spotify_id && (candidate.image_url || candidate.current_listeners != null));
   const normalized = normalizeName(name);
   const exact = candidates.find((candidate) => normalizeName(candidate.display_name) === normalized);
   const prefix = candidates.find((candidate) => normalizeName(candidate.display_name).startsWith(normalized) || normalized.startsWith(normalizeName(candidate.display_name)));
@@ -1255,6 +1258,12 @@ function numberFromUnknown(value: unknown): number | null {
   if (typeof value !== "string") return null;
   const parsed = Number(value.replace(/,/g, ""));
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function stringFromUnknown(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const clean = value.trim();
+  return clean.length > 0 ? clean : null;
 }
 
 function weekStartIso(value: string): string {
