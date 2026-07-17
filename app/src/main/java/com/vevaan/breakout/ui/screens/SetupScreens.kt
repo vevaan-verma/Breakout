@@ -111,6 +111,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -186,6 +187,8 @@ import kotlin.math.log10
 import kotlin.math.max
 import kotlin.random.Random
 
+internal val LocalNavigationRefreshTick = staticCompositionLocalOf { 0 }
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun ScreenColumn(
@@ -197,6 +200,7 @@ internal fun ScreenColumn(
 ) {
     val focusManager = LocalFocusManager.current
     val listState = externalListState ?: rememberLazyListState()
+    val navigationRefreshTick = LocalNavigationRefreshTick.current
     var pullDistance by remember { mutableStateOf(0f) }
     var refreshTriggered by remember { mutableStateOf(false) }
     val refreshThreshold = 148f
@@ -211,6 +215,13 @@ internal fun ScreenColumn(
 
     LaunchedEffect(refreshing) {
         if (!refreshing) refreshTriggered = false
+    }
+
+    LaunchedEffect(navigationRefreshTick) {
+        if (navigationRefreshTick > 0) {
+            focusManager.clearFocus()
+            listState.animateScrollToItem(0)
+        }
     }
 
     val nestedScrollConnection = remember(canPullRefresh, refreshing, listState) {

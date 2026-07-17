@@ -30,6 +30,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,7 +39,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -260,6 +260,7 @@ internal fun MarketScreen(
     var computedSearchRows by remember { mutableStateOf<List<ArtistUi>?>(null) }
     var searchLoadingVisible by remember { mutableStateOf(false) }
     var restoredScrollKey by remember { mutableStateOf<String?>(null) }
+    var scrollSavingEnabledKey by remember { mutableStateOf<String?>(null) }
     val effectiveQuery = submittedSearch.trim()
     val dataKey = effectiveQuery.lowercase()
     val filterKey = "${dataKey}|${activeFilter?.name ?: "search"}"
@@ -296,10 +297,24 @@ internal fun MarketScreen(
         if (effectiveQuery.isBlank() && activeFilter == null) onActiveFilterChange(startFilter)
     }
 
+    LaunchedEffect(query, effectiveQuery) {
+        if (query.isBlank() && effectiveQuery.isBlank()) {
+            focusManager.clearFocus()
+        }
+    }
+
     fun submitSearch() {
         val cleaned = query.trim()
         if (cleaned.isBlank()) return
         if (marketState !is MarketState.Ready) return
+        val searchKey = "search:${cleaned.lowercase()}"
+        if (submittedSearch.equals(cleaned, ignoreCase = true) && computedSearchRows != null) {
+            focusManager.clearFocus()
+            scrollPositions[searchKey].parseScrollPosition()?.let { (index, offset) ->
+                scope.launch { listState.animateScrollToItem(index, offset) }
+            }
+            return
+        }
         onSubmittedSearchChange(cleaned)
         searchLoadingVisible = true
         activeFilter?.let { onPreviousFilterChange(it) }
@@ -325,19 +340,20 @@ internal fun MarketScreen(
             if (saved != null) {
                 listState.animateScrollToItem(saved.first, saved.second)
             } else {
-                listState.animateScrollToItem(0)
+                listState.smoothMarketScrollToTop()
             }
         }
     }
 
     LaunchedEffect(resetTick) {
         if (resetTick <= 0) return@LaunchedEffect
+        focusManager.clearFocus()
         searchLoadingVisible = false
         computedSearchRows = null
         restoredScrollKey = "filter:${MarketFilter.Trending.name}"
         artistListVisible = false
         delay(80)
-        listState.animateScrollToItem(0)
+        listState.smoothMarketScrollToTop()
         artistListVisible = true
     }
 
@@ -392,10 +408,15 @@ internal fun MarketScreen(
     fun List<ArtistUi>.filtered(): List<ArtistUi> = filteredForFilter(activeFilter)
 
     val readyArtists = (displayedState as? MarketState.Ready)?.artists
-    LaunchedEffect(effectiveQuery, readyArtists, snapshots) {
-        computedSearchRows = null
+    LaunchedEffect(effectiveQuery, readyArtists, snapshots, loadedMarketKey) {
         if (effectiveQuery.isNotBlank()) searchLoadingVisible = true
         val source = readyArtists.orEmpty()
+        if (effectiveQuery.isNotBlank() && loadedMarketKey == dataKey && source.isNotEmpty()) {
+            computedSearchRows = computedSearchRows ?: source.marketDistinct()
+            searchLoadingVisible = false
+            return@LaunchedEffect
+        }
+        computedSearchRows = null
         if (effectiveQuery.isBlank() || source.isEmpty()) {
             if (effectiveQuery.isBlank()) searchLoadingVisible = false
             return@LaunchedEffect
@@ -424,12 +445,23 @@ internal fun MarketScreen(
             .sortedBy { artist -> draftPickMode && roster.values.any { it.name == artist.name } }
             .marketDistinct()
     }
-    val filteredPreview = remember(allFilteredArtists, visibleCount) {
-        allFilteredArtists.take(visibleCount)
-    }
     val visibleRowsKey = remember(filterKey, effectiveQuery, allFilteredArtists) {
         "$filterKey:${allFilteredArtists.size}:${allFilteredArtists.take(MarketInitialPageSize).joinToString("|") { it.stableListKey() }}"
     }
+    val savedScrollForCurrentKey = scrollPositions[scrollMemoryKey].parseScrollPosition()
+    val restoredVisibleCount = savedScrollForCurrentKey?.first
+        ?.let { ((it / MarketInitialPageSize) + 2) * MarketInitialPageSize }
+        ?.coerceAtMost(allFilteredArtists.size)
+        ?: MarketInitialPageSize
+    val cachedVisibleRows = remember(allFilteredArtists, visibleCount, restoredVisibleCount) {
+        allFilteredArtists.take(maxOf(visibleCount, restoredVisibleCount, MarketInitialPageSize))
+    }
+    val rowsReadyForCurrentKey = displayedState is MarketState.Ready &&
+        visibleArtistListKey == visibleRowsKey &&
+        artistListVisible
+    val rowsStagedForCurrentKey = displayedState is MarketState.Ready &&
+        visibleArtistListKey == visibleRowsKey
+    val transitioningArtistRows = displayedState is MarketState.Ready && !rowsReadyForCurrentKey
     val initialMarketLoading = effectiveQuery.isBlank() && displayedState is MarketState.Loading
 
     LaunchedEffect(visibleRowsKey, displayedState) {
@@ -439,32 +471,44 @@ internal fun MarketScreen(
             return@LaunchedEffect
         }
         if (visibleArtistListKey != visibleRowsKey) {
+            scrollSavingEnabledKey = null
             artistListVisible = false
-            onVisibleCountChange(MarketInitialPageSize)
             onOpenActionArtistKeyChange(null)
             delay(120)
-            val savedScroll = scrollPositions[scrollMemoryKey].parseScrollPosition()
+            val savedScroll = savedScrollForCurrentKey
+            val neededCount = restoredVisibleCount
+            onVisibleCountChange(neededCount.coerceAtLeast(MarketInitialPageSize))
             if (lastMarketKey != visibleRowsKey) {
                 if (savedScroll != null) {
                     listState.animateScrollToItem(savedScroll.first, savedScroll.second)
                 } else {
-                    listState.animateScrollToItem(0)
+                    listState.smoothMarketScrollToTop()
                 }
             }
-            val firstRows = allFilteredArtists.take(MarketInitialPageSize)
+            val firstRows = allFilteredArtists.take(neededCount.coerceAtLeast(MarketInitialPageSize))
             visibleArtistRows = firstRows
             visibleArtistListKey = visibleRowsKey
             animatingArtistKeys = firstRows.map { it.stableListKey() }.toSet()
             delay(180)
             artistListVisible = true
-            delay(520)
+            scrollSavingEnabledKey = scrollMemoryKey
+            delay(720)
             animatingArtistKeys = emptySet()
             if (effectiveQuery.isNotBlank()) searchLoadingVisible = false
         }
         onLastMarketKeyChange(visibleRowsKey)
     }
 
-    LaunchedEffect(listState, scrollMemoryKey, displayedState) {
+    LaunchedEffect(
+        listState,
+        scrollMemoryKey,
+        displayedState,
+        visibleRowsKey,
+        visibleArtistListKey,
+        visibleArtistRows.size,
+        cachedVisibleRows.size,
+        scrollSavingEnabledKey
+    ) {
         if (displayedState !is MarketState.Ready) return@LaunchedEffect
         if (restoredScrollKey != scrollMemoryKey) {
             restoredScrollKey = scrollMemoryKey
@@ -472,11 +516,18 @@ internal fun MarketScreen(
                 delay(80)
                 listState.animateScrollToItem(index, offset)
             }
+            scrollSavingEnabledKey = scrollMemoryKey
         }
         snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
             .distinctUntilChanged()
             .collect { (index, offset) ->
-                onScrollPositionChange(scrollMemoryKey, "$index:$offset")
+                if (
+                    scrollSavingEnabledKey == scrollMemoryKey &&
+                    visibleArtistListKey == visibleRowsKey &&
+                    (visibleArtistRows.isNotEmpty() || cachedVisibleRows.isNotEmpty())
+                ) {
+                    onScrollPositionChange(scrollMemoryKey, "$index:$offset")
+                }
             }
     }
 
@@ -733,6 +784,12 @@ internal fun MarketScreen(
                                         selected?.let {
                                             if (effectiveQuery.isNotBlank()) {
                                                 clearSearch(it)
+                                            } else if (it == activeFilter) {
+                                                focusManager.clearFocus()
+                                                onOpenActionArtistKeyChange(null)
+                                                onVisibleCountChange(MarketInitialPageSize)
+                                                onScrollPositionChange("filter:${it.name}", "0:0")
+                                                scope.launch { listState.smoothMarketScrollToTop() }
                                             } else {
                                                 onPreviousFilterChange(it)
                                                 onActiveFilterChange(it)
@@ -750,7 +807,13 @@ internal fun MarketScreen(
                 is MarketState.Empty -> item { MarketEmptyState(title = "No Artists Found", detail = current.message) }
                 is MarketState.Error -> item { StatusCard("Market Error", current.message) }
                 is MarketState.Ready -> {
-                    val filteredArtists = visibleArtistRows
+                    val filteredArtists = if (rowsReadyForCurrentKey && visibleArtistRows.isEmpty() && cachedVisibleRows.isNotEmpty()) {
+                        cachedVisibleRows
+                    } else if (rowsStagedForCurrentKey) {
+                        visibleArtistRows
+                    } else {
+                        emptyList()
+                    }
                     if (filteredArtists.isEmpty()) {
                         item {
                             val searchStillSettling = effectiveQuery.isNotBlank() &&
@@ -758,7 +821,8 @@ internal fun MarketScreen(
                             Crossfade(
                                 targetState = when {
                                     searchStillSettling -> "searching"
-                                    artistListVisible && visibleArtistListKey == visibleRowsKey -> "empty"
+                                    transitioningArtistRows -> "spacer"
+                                    rowsReadyForCurrentKey && allFilteredArtists.isEmpty() -> "empty"
                                     else -> "spacer"
                                 },
                                 animationSpec = tween(durationMillis = 220),
@@ -767,10 +831,10 @@ internal fun MarketScreen(
                                 when (state) {
                                     "searching" -> AnimatedVisibility(
                                         visible = true,
-                                        enter = fadeIn(animationSpec = tween(220)) + expandVertically(animationSpec = tween(220)),
-                                        exit = fadeOut(animationSpec = tween(160)) + shrinkVertically(animationSpec = tween(160))
+                                        enter = fadeIn(animationSpec = tween(260)) + expandVertically(animationSpec = tween(300)),
+                                        exit = fadeOut(animationSpec = tween(320)) + shrinkVertically(animationSpec = tween(340))
                                     ) {
-                                        LoadingState("Searching Artists")
+                                        MarketSearchingState()
                                     }
                                     "empty" -> MarketEmptyState(
                                         title = if (effectiveQuery.isNotBlank()) "No Results Found" else "${activeFilter?.label ?: "Search"} Empty",
@@ -785,17 +849,6 @@ internal fun MarketScreen(
                             }
                         }
                     } else {
-                        if (effectiveQuery.isNotBlank()) {
-                            item(key = "searching-transition") {
-                                AnimatedVisibility(
-                                    visible = searchLoadingVisible,
-                                    enter = fadeIn(animationSpec = tween(220)) + expandVertically(animationSpec = tween(220)),
-                                    exit = fadeOut(animationSpec = tween(220)) + shrinkVertically(animationSpec = tween(220))
-                                ) {
-                                    LoadingState("Searching Artists")
-                                }
-                            }
-                        }
                         itemsIndexed(filteredArtists, key = { index, artist -> "${visibleArtistListKey ?: filterKey}:$index:${artist.stableListKey()}" }) { index, artist ->
                             val rowDelay = (index.coerceAtMost(9) * 42)
                             val shouldAnimateRow = artist.stableListKey() in animatingArtistKeys
@@ -986,8 +1039,7 @@ private fun MarketSearchActionButton(
     )
     Box(
         modifier = Modifier
-            .width(52.dp)
-            .fillMaxHeight()
+            .size(56.dp)
             .clip(CircleShape)
             .background(background)
             .border(1.dp, border, CircleShape)
@@ -1000,6 +1052,62 @@ private fun MarketSearchActionButton(
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Black
         )
+    }
+}
+
+private suspend fun LazyListState.smoothMarketScrollToTop() {
+    val viewportStep = (layoutInfo.viewportSize.height * 0.42f).coerceAtLeast(240f)
+    repeat(80) {
+        if (firstVisibleItemIndex == 0 && firstVisibleItemScrollOffset == 0) return
+        scrollBy(-viewportStep)
+        delay(16)
+    }
+    if (firstVisibleItemIndex != 0 || firstVisibleItemScrollOffset != 0) {
+        animateScrollToItem(0)
+    }
+}
+
+@Composable
+private fun MarketSearchingState() {
+    BreakoutCard(
+        contentPadding = PaddingValues(BreakoutDimensions.md),
+        border = BorderStroke(1.dp, BreakoutPrimary.copy(alpha = 0.44f))
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.md),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(52.dp)
+                    .clip(CircleShape)
+                    .background(BreakoutPrimary.copy(alpha = 0.12f))
+                    .border(1.dp, BreakoutPrimary.copy(alpha = 0.38f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(28.dp),
+                    strokeWidth = 3.dp,
+                    color = BreakoutPrimary
+                )
+            }
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                Text(
+                    "Searching Artists",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Black
+                )
+                Text(
+                    "Matching the cached market without blocking the screen",
+                    color = BreakoutTextSecondary,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        }
     }
 }
 

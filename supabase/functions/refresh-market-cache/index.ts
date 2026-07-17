@@ -9,12 +9,25 @@ const MaxArtworkLimit = 100;
 const ArtworkRetryDelayHours = 24;
 const MaxArtworkAttempts = 3;
 const FetchTimeoutMs = 12_000;
+const MarketArtistSelect = "spotify_id,name,normalized_name,image_url,image_url_card,image_url_full,current_listeners,current_listeners_observed_at,current_listeners_source,snapshot_listeners,snapshot_previous_listeners,snapshot_date,listener_change_since_snapshot,listener_change_since_snapshot_percent,days_since_snapshot,listeners,weekly_listener_gain,weekly_listener_growth_percent,monthly_listener_change_percent,daily_listener_change,kworb_rank,source,score_status,provider_url,data_date,listener_history,top_tracks,discography,top_cities,updated_at";
+const MarketArtistSelectWithAttempts = `${MarketArtistSelect},artwork_last_attempted_at,artwork_attempt_count`;
 
 type MarketArtist = {
   spotify_id?: string | null;
   name: string;
   normalized_name: string;
   image_url?: string | null;
+  image_url_card?: string | null;
+  image_url_full?: string | null;
+  current_listeners?: number | null;
+  current_listeners_observed_at?: string | null;
+  current_listeners_source?: string | null;
+  snapshot_listeners?: number | null;
+  snapshot_previous_listeners?: number | null;
+  snapshot_date?: string | null;
+  listener_change_since_snapshot?: number | null;
+  listener_change_since_snapshot_percent?: number | null;
+  days_since_snapshot?: number | null;
   listeners?: number | null;
   weekly_listener_gain?: number | null;
   weekly_listener_growth_percent?: number | null;
@@ -58,13 +71,18 @@ type WeeklyMetric = {
   normalized_name: string;
   name: string;
   week_start: string;
+  snapshot_date?: string | null;
   role: string;
   listeners: number | null;
+  snapshot_listeners?: number | null;
+  previous_snapshot_listeners?: number | null;
   weekly_listener_gain: number | null;
   weekly_listener_growth_percent: number | null;
   daily_listener_change: number | null;
   kworb_rank: number | null;
   source: string | null;
+  top_city?: unknown;
+  fetched_at?: string;
   raw_data: Record<string, unknown>;
 };
 
@@ -122,6 +140,61 @@ Deno.serve(async (request) => {
         updated: normalized.length,
         musicMetricsVault: artists.length,
         withImages: normalized.filter((artist) => artist.image_url).length,
+        durationMs: Date.now() - startedAt,
+      });
+    }
+
+    if (mode === "watch-pastspot") {
+      const latestDate = await loadPastspotLatestSnapshotDate();
+      const state = await loadPastspotSnapshotState();
+      const nowIso = new Date().toISOString();
+      const isNewDate = latestDate != null && latestDate !== state.processed_date;
+      const firstSeenAt = isNewDate && latestDate === state.latest_seen_date
+        ? state.first_seen_at
+        : nowIso;
+      const readyForRefresh = isNewDate &&
+        firstSeenAt != null &&
+        Date.now() - Date.parse(firstSeenAt) >= 90 * 60 * 1000;
+      await savePastspotSnapshotState({
+        latest_seen_date: latestDate,
+        first_seen_at: firstSeenAt,
+        last_checked_at: nowIso,
+        check_payload: { mode, latestDate, readyForRefresh },
+      });
+      if (!readyForRefresh || latestDate == null) {
+        return json({
+          mode,
+          latestDate,
+          processedDate: state.processed_date,
+          readyForRefresh,
+          durationMs: Date.now() - startedAt,
+        });
+      }
+      const [pastspot, kworb] = await Promise.all([
+        loadPastspotGainers(),
+        loadKworbListeners(),
+      ]);
+      const normalized = mergeArtists([...pastspot, ...kworb])
+        .slice(0, 10000)
+        .map(normalizeMarketArtist);
+      if (normalized.length > 0) {
+        await upsertMarketArtists(normalized);
+        await upsertWeeklyMetrics(buildWeeklyMetrics(normalized));
+      }
+      await savePastspotSnapshotState({
+        latest_seen_date: latestDate,
+        first_seen_at: firstSeenAt,
+        processed_date: latestDate,
+        processed_at: new Date().toISOString(),
+        last_checked_at: new Date().toISOString(),
+        check_payload: { mode, latestDate, refreshed: normalized.length },
+      });
+      return json({
+        mode,
+        latestDate,
+        refreshed: normalized.length,
+        pastspot: pastspot.length,
+        kworb: kworb.length,
         durationMs: Date.now() - startedAt,
       });
     }
@@ -244,7 +317,7 @@ async function preserveExistingArtwork(artists: MarketArtist[]): Promise<MarketA
   const names = missing
     .map((name) => `"${String(name).replaceAll("\"", "\\\"")}"`)
     .join(",");
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/market_artist_cache?select=normalized_name,image_url&image_url=not.is.null&normalized_name=in.(${encodeURIComponent(names)})`, {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/market_artist_cache?select=normalized_name,image_url,image_url_card,image_url_full&image_url=not.is.null&normalized_name=in.(${encodeURIComponent(names)})`, {
     signal: AbortSignal.timeout(FetchTimeoutMs),
     headers: {
       "apikey": SERVICE_ROLE_KEY,
@@ -253,14 +326,23 @@ async function preserveExistingArtwork(artists: MarketArtist[]): Promise<MarketA
   }).catch(() => null);
   if (!response?.ok) return artists;
   const rows = await response.json().catch(() => []);
-  const byName = new Map<string, string>();
+  const byName = new Map<string, Pick<MarketArtist, "image_url" | "image_url_card" | "image_url_full">>();
   for (const row of rows) {
-    if (row?.normalized_name && row?.image_url) byName.set(row.normalized_name, row.image_url);
+    if (row?.normalized_name && row?.image_url) {
+      byName.set(row.normalized_name, {
+        image_url: row.image_url,
+        image_url_card: row.image_url_card ?? null,
+        image_url_full: row.image_url_full ?? row.image_url,
+      });
+    }
   }
-  return artists.map((artist) => artist.image_url ? artist : {
+  const withExisting = artists.map((artist) => artist.image_url ? artist : {
     ...artist,
-    image_url: byName.get(artist.normalized_name) ?? artist.image_url ?? null,
+    image_url: byName.get(artist.normalized_name)?.image_url ?? artist.image_url ?? null,
+    image_url_card: byName.get(artist.normalized_name)?.image_url_card ?? artist.image_url_card ?? null,
+    image_url_full: byName.get(artist.normalized_name)?.image_url_full ?? artist.image_url_full ?? null,
   });
+  return withExisting.map(normalizeArtworkUrls);
 }
 
 async function markArtworkAttempts(artists: MarketArtist[]): Promise<void> {
@@ -283,7 +365,7 @@ async function markArtworkAttempts(artists: MarketArtist[]): Promise<void> {
 
 async function countMissingArtwork(): Promise<number> {
   const response = await fetch(
-    `${SUPABASE_URL}/rest/v1/market_artist_cache?select=normalized_name&image_url=is.null`,
+    `${SUPABASE_URL}/rest/v1/market_artist_cache?select=normalized_name&or=(image_url.is.null,current_listeners.is.null)`,
     {
       signal: AbortSignal.timeout(FetchTimeoutMs),
       headers: {
@@ -305,10 +387,9 @@ async function countMissingArtwork(): Promise<number> {
 async function loadArtistsMissingArtwork(limit: number): Promise<MarketArtist[]> {
   const retryBefore = new Date(Date.now() - ArtworkRetryDelayHours * 60 * 60 * 1000).toISOString();
   const query = new URLSearchParams({
-    select: "spotify_id,name,normalized_name,image_url,listeners,weekly_listener_gain,weekly_listener_growth_percent,monthly_listener_change_percent,daily_listener_change,kworb_rank,source,score_status,provider_url,data_date,listener_history,top_tracks,discography,top_cities,artwork_last_attempted_at,artwork_attempt_count,updated_at",
-    image_url: "is.null",
+    select: MarketArtistSelectWithAttempts,
+    and: `(or(image_url.is.null,current_listeners.is.null),or(artwork_last_attempted_at.is.null,artwork_last_attempted_at.lt.${retryBefore}))`,
     artwork_attempt_count: `lt.${MaxArtworkAttempts}`,
-    or: `(artwork_last_attempted_at.is.null,artwork_last_attempted_at.lt.${retryBefore})`,
     order: "artwork_last_attempted_at.asc.nullsfirst,artwork_attempt_count.asc,listeners.desc.nullslast",
   });
   const response = await fetch(
@@ -334,7 +415,7 @@ async function loadCachedMarketArtistsForMetrics(limit: number): Promise<MarketA
   while (offset < limit) {
     const pageLimit = Math.min(pageSize, limit - offset);
     const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/market_artist_cache?select=spotify_id,name,normalized_name,image_url,listeners,weekly_listener_gain,weekly_listener_growth_percent,monthly_listener_change_percent,daily_listener_change,kworb_rank,source,score_status,provider_url,data_date,listener_history,top_tracks,discography,top_cities,updated_at&updated_at=gte.${encodeURIComponent(new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString())}&order=listeners.desc.nullslast`,
+      `${SUPABASE_URL}/rest/v1/market_artist_cache?select=${MarketArtistSelect}&updated_at=gte.${encodeURIComponent(new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString())}&order=listeners.desc.nullslast`,
       {
         signal: AbortSignal.timeout(FetchTimeoutMs),
         headers: {
@@ -374,21 +455,31 @@ function buildWeeklyMetrics(artists: MarketArtist[]): WeeklyMetric[] {
 }
 
 function metricFromArtist(artist: MarketArtist): WeeklyMetric {
-  const date = artist.data_date ?? artist.updated_at ?? new Date().toISOString();
+  const date = artist.snapshot_date ?? artist.data_date ?? artist.updated_at ?? new Date().toISOString();
+  const snapshotListeners = artist.snapshot_listeners ?? artist.listeners ?? null;
   return {
     spotify_id: artist.spotify_id ?? null,
     normalized_name: artist.normalized_name,
     name: artist.name,
     week_start: weekStartIso(date),
-    role: roleForListeners(artist.listeners ?? null),
-    listeners: artist.listeners ?? null,
+    snapshot_date: date.slice(0, 10),
+    role: roleForListeners(snapshotListeners),
+    listeners: snapshotListeners,
+    snapshot_listeners: snapshotListeners,
+    previous_snapshot_listeners: artist.snapshot_previous_listeners ?? (
+      snapshotListeners != null && artist.weekly_listener_gain != null ? snapshotListeners - artist.weekly_listener_gain : null
+    ),
     weekly_listener_gain: artist.weekly_listener_gain ?? null,
     weekly_listener_growth_percent: artist.weekly_listener_growth_percent ?? artist.monthly_listener_change_percent ?? null,
     daily_listener_change: artist.daily_listener_change ?? null,
     kworb_rank: artist.kworb_rank ?? null,
     source: artist.source ?? null,
+    top_city: Array.isArray(artist.top_cities) ? artist.top_cities[0] ?? null : null,
+    fetched_at: new Date().toISOString(),
     raw_data: {
       data_date: artist.data_date ?? null,
+      snapshot_date: artist.snapshot_date ?? null,
+      current_listeners: artist.current_listeners ?? null,
       top_tracks: artist.top_tracks ?? [],
       discography: artist.discography ?? [],
       top_cities: artist.top_cities ?? [],
@@ -407,18 +498,24 @@ function metricFromHistoryEntry(artist: MarketArtist, entry: unknown): WeeklyMet
   const gain = listeners != null && growth != null && growth !== -100
     ? Math.round(listeners - listeners / (1 + growth / 100))
     : null;
+  const previous = listeners != null && gain != null ? listeners - gain : null;
   return {
     spotify_id: artist.spotify_id ?? null,
     normalized_name: artist.normalized_name,
     name: artist.name,
     week_start: weekStartIso(date),
+    snapshot_date: date.slice(0, 10),
     role: roleForListeners(listeners),
     listeners,
+    snapshot_listeners: listeners,
+    previous_snapshot_listeners: previous,
     weekly_listener_gain: gain,
     weekly_listener_growth_percent: growth,
     daily_listener_change: gain == null ? null : Math.round(gain / 7),
     kworb_rank: null,
     source: "Pastspot listener history",
+    top_city: Array.isArray(artist.top_cities) ? artist.top_cities[0] ?? null : null,
+    fetched_at: new Date().toISOString(),
     raw_data: { history: row },
   };
 }
@@ -638,15 +735,58 @@ async function loadPastspotGainers(): Promise<MarketArtist[]> {
   });
 }
 
+type PastspotSnapshotState = {
+  latest_seen_date?: string | null;
+  first_seen_at?: string | null;
+  processed_date?: string | null;
+  processed_at?: string | null;
+  last_checked_at?: string | null;
+  check_payload?: Record<string, unknown>;
+};
+
+async function loadPastspotLatestSnapshotDate(): Promise<string | null> {
+  const detail = await loadPastspotArtistDetail("0du5cEVh5yTK9QJze8zA0C");
+  return detail.data_date ? detail.data_date.slice(0, 10) : null;
+}
+
+async function loadPastspotSnapshotState(): Promise<PastspotSnapshotState> {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/pastspot_snapshot_state?select=latest_seen_date,first_seen_at,processed_date,processed_at,last_checked_at,check_payload&id=eq.true&limit=1`, {
+    signal: AbortSignal.timeout(FetchTimeoutMs),
+    headers: {
+      "apikey": SERVICE_ROLE_KEY,
+      "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
+    },
+  });
+  if (!response.ok) return {};
+  const rows = await response.json().catch(() => []);
+  return rows[0] ?? {};
+}
+
+async function savePastspotSnapshotState(state: PastspotSnapshotState): Promise<void> {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/pastspot_snapshot_state?on_conflict=id`, {
+    method: "POST",
+    signal: AbortSignal.timeout(FetchTimeoutMs),
+    headers: {
+      "apikey": SERVICE_ROLE_KEY,
+      "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
+      "Content-Type": "application/json",
+      "Prefer": "resolution=merge-duplicates",
+    },
+    body: JSON.stringify([{ id: true, ...state }]),
+  });
+  if (!response.ok) throw new Error(await response.text());
+}
+
 async function fillMissingPastspotArtwork(artist: MarketArtist): Promise<MarketArtist> {
-  if (artist.image_url || !artist.name) return artist;
+  if ((artist.image_url && artist.current_listeners != null) || !artist.name) return artist;
   const detailById = artist.spotify_id
     ? await loadPastspotArtistDetail(artist.spotify_id).catch(() => null)
     : null;
-  if (detailById?.image_url) {
-    return {
+  let enriched = artist;
+  if (detailById?.image_url || detailById?.listeners != null) {
+    enriched = {
       ...artist,
-      image_url: detailById.image_url,
+      image_url: detailById.image_url ?? artist.image_url ?? null,
       listeners: detailById.listeners ?? artist.listeners ?? null,
       monthly_listener_change_percent: detailById.monthly_listener_change_percent ?? artist.monthly_listener_change_percent ?? null,
       data_date: detailById.data_date ? detailById.data_date.slice(0, 10) : artist.data_date ?? null,
@@ -655,27 +795,41 @@ async function fillMissingPastspotArtwork(artist: MarketArtist): Promise<MarketA
       discography: firstNonEmptyArray(detailById.discography, artist.discography),
       top_cities: firstNonEmptyArray(detailById.top_cities, artist.top_cities),
     };
+    if (enriched.image_url && enriched.current_listeners != null) return enriched;
   }
-  const search = await loadPastspotSearchArtwork(artist.name).catch(() => null);
-  if (!search) return artist;
+  const search = await loadPastspotSearchBasics(artist.name).catch(() => null);
+  if (!search) return enriched;
+  const now = new Date().toISOString();
   return {
-    ...artist,
-    spotify_id: artist.spotify_id ?? search.spotify_id ?? null,
-    image_url: search.image_url ?? artist.image_url ?? null,
-    provider_url: artist.provider_url ?? search.provider_url ?? null,
+    ...enriched,
+    spotify_id: enriched.spotify_id ?? search.spotify_id ?? null,
+    image_url: search.image_url ?? enriched.image_url ?? null,
+    current_listeners: search.current_listeners ?? enriched.current_listeners ?? null,
+    current_listeners_observed_at: search.current_listeners != null ? now : enriched.current_listeners_observed_at ?? null,
+    current_listeners_source: search.current_listeners != null ? "Pastspot search" : enriched.current_listeners_source ?? null,
+    provider_url: enriched.provider_url ?? search.provider_url ?? null,
   };
 }
 
-async function loadPastspotSearchArtwork(name: string): Promise<Pick<MarketArtist, "spotify_id" | "image_url" | "provider_url"> | null> {
+async function loadPastspotSearchBasics(name: string): Promise<Pick<MarketArtist, "spotify_id" | "image_url" | "provider_url" | "current_listeners"> | null> {
   const html = await fetchText(`https://pastspot.com/search?q=${encodeURIComponent(name)}`);
-  const candidates = [...html.matchAll(/href="\/artists\/([^"?]+)(?:\?[^"]*)?".{0,1800}?<img src="([^"]*)" alt="([^"]*)"/gis)]
-    .map((match) => ({
+  const cardMatches = [...html.matchAll(/<a[^>]+href="\/artists\/([^"?]+)(?:\?[^"]*)?"[\s\S]{0,2600}?<\/a>/gi)];
+  const candidates = cardMatches.map((match) => {
+    const block = match[0] ?? "";
+    const image = firstMatch(block, /<img[^>]+src="([^"]+)"/i);
+    const alt = firstMatch(block, /<img[^>]+alt="([^"]*)"/i);
+    const listenersText =
+      firstMatch(block, /([0-9][0-9,]*)\s*(?:monthly\s*)?listeners/i) ??
+      firstMatch(block, /aria-label="[^"]*listeners[^"]*?([0-9][0-9,]*)/i) ??
+      firstMatch(block, />([0-9][0-9,]*)<\/[^>]+>\s*<\/[^>]+>\s*<\/[^>]+>/i);
+    return {
       spotify_id: match[1] || null,
-      image_url: htmlDecode(match[2] ?? "") || null,
-      display_name: cleanText(match[3] ?? ""),
+      image_url: image ? htmlDecode(image) : null,
+      display_name: cleanText(alt ?? ""),
+      current_listeners: parseInteger(listenersText ?? undefined),
       provider_url: match[1] ? `https://pastspot.com/artists/${match[1]}` : null,
-    }))
-    .filter((candidate) => candidate.spotify_id && candidate.image_url);
+    };
+  }).filter((candidate) => candidate.spotify_id && (candidate.image_url || candidate.current_listeners != null));
   const normalized = normalizeName(name);
   const exact = candidates.find((candidate) => normalizeName(candidate.display_name) === normalized);
   const prefix = candidates.find((candidate) => normalizeName(candidate.display_name).startsWith(normalized) || normalized.startsWith(normalizeName(candidate.display_name)));
@@ -683,6 +837,7 @@ async function loadPastspotSearchArtwork(name: string): Promise<Pick<MarketArtis
   return best ? {
     spotify_id: best.spotify_id,
     image_url: best.image_url,
+    current_listeners: best.current_listeners ?? null,
     provider_url: best.provider_url,
   } : null;
 }
@@ -829,6 +984,14 @@ function mergeArtists(artists: MarketArtist[]): MarketArtist[] {
       ...artist,
       spotify_id: current.spotify_id ?? artist.spotify_id ?? null,
       image_url: current.image_url ?? artist.image_url ?? null,
+      image_url_card: current.image_url_card ?? artist.image_url_card ?? null,
+      image_url_full: current.image_url_full ?? artist.image_url_full ?? null,
+      current_listeners: maxOfNumbers(current.current_listeners, artist.current_listeners, current.listeners, artist.listeners),
+      current_listeners_observed_at: current.current_listeners_observed_at ?? artist.current_listeners_observed_at ?? current.updated_at ?? artist.updated_at ?? null,
+      current_listeners_source: current.current_listeners_source ?? artist.current_listeners_source ?? current.source ?? artist.source ?? null,
+      snapshot_listeners: current.snapshot_listeners ?? artist.snapshot_listeners ?? current.listeners ?? artist.listeners ?? null,
+      snapshot_previous_listeners: current.snapshot_previous_listeners ?? artist.snapshot_previous_listeners ?? null,
+      snapshot_date: current.snapshot_date ?? artist.snapshot_date ?? current.data_date ?? artist.data_date ?? null,
       listeners: maxNumber(current.listeners, artist.listeners),
       weekly_listener_gain: current.weekly_listener_gain ?? artist.weekly_listener_gain ?? null,
       weekly_listener_growth_percent: current.weekly_listener_growth_percent ?? artist.weekly_listener_growth_percent ?? null,
@@ -854,27 +1017,114 @@ function mergeArtists(artists: MarketArtist[]): MarketArtist[] {
 }
 
 function normalizeMarketArtist(artist: MarketArtist): MarketArtist {
+  const artwork = normalizeArtworkUrls(artist);
+  const currentListeners = artwork.current_listeners ?? null;
+  const snapshotListeners = artwork.snapshot_listeners ?? snapshotListenersFromHistory(artwork) ?? artwork.listeners ?? null;
+  const snapshotDate = artwork.snapshot_date ?? artwork.data_date ?? latestHistoryDate(artwork) ?? null;
+  const weeklyGain = artwork.weekly_listener_gain ?? gainFromSnapshot(snapshotListeners, artwork.weekly_listener_growth_percent ?? artwork.monthly_listener_change_percent ?? null);
+  const previousSnapshotListeners = artwork.snapshot_previous_listeners ?? (
+    snapshotListeners != null && weeklyGain != null ? snapshotListeners - weeklyGain : null
+  );
+  const sinceSnapshot = currentListeners != null && snapshotListeners != null ? currentListeners - snapshotListeners : null;
+  const sinceSnapshotPercent = sinceSnapshot != null && snapshotListeners != null && snapshotListeners > 0
+    ? (sinceSnapshot / snapshotListeners) * 100
+    : null;
   return {
-    spotify_id: artist.spotify_id ?? null,
-    name: artist.name,
-    normalized_name: artist.normalized_name,
-    image_url: artist.image_url ?? null,
-    listeners: artist.listeners ?? null,
-    weekly_listener_gain: artist.weekly_listener_gain ?? null,
-    weekly_listener_growth_percent: artist.weekly_listener_growth_percent ?? null,
-    monthly_listener_change_percent: artist.monthly_listener_change_percent ?? null,
-    daily_listener_change: artist.daily_listener_change ?? null,
-    kworb_rank: artist.kworb_rank ?? null,
-    source: artist.source,
-    score_status: artist.score_status,
-    provider_url: artist.provider_url ?? null,
-    data_date: artist.data_date ?? null,
-    listener_history: artist.listener_history ?? [],
-    top_tracks: artist.top_tracks ?? [],
-    discography: artist.discography ?? [],
-    top_cities: artist.top_cities ?? [],
-    updated_at: artist.updated_at,
+    spotify_id: artwork.spotify_id ?? null,
+    name: artwork.name,
+    normalized_name: artwork.normalized_name,
+    image_url: artwork.image_url ?? null,
+    image_url_card: artwork.image_url_card ?? null,
+    image_url_full: artwork.image_url_full ?? artwork.image_url ?? null,
+    current_listeners: currentListeners,
+    current_listeners_observed_at: currentListeners != null ? artwork.current_listeners_observed_at ?? artwork.updated_at ?? null : null,
+    current_listeners_source: currentListeners != null ? artwork.current_listeners_source ?? artwork.source ?? null : null,
+    snapshot_listeners: snapshotListeners,
+    snapshot_previous_listeners: previousSnapshotListeners,
+    snapshot_date: snapshotDate ? snapshotDate.slice(0, 10) : null,
+    listener_change_since_snapshot: sinceSnapshot,
+    listener_change_since_snapshot_percent: sinceSnapshotPercent,
+    days_since_snapshot: snapshotDate ? daysSince(snapshotDate) : null,
+    listeners: currentListeners ?? snapshotListeners,
+    weekly_listener_gain: weeklyGain,
+    weekly_listener_growth_percent: artwork.weekly_listener_growth_percent ?? null,
+    monthly_listener_change_percent: artwork.monthly_listener_change_percent ?? null,
+    daily_listener_change: artwork.daily_listener_change ?? null,
+    kworb_rank: artwork.kworb_rank ?? null,
+    source: artwork.source,
+    score_status: artwork.score_status,
+    provider_url: artwork.provider_url ?? null,
+    data_date: artwork.data_date ?? null,
+    listener_history: artwork.listener_history ?? [],
+    top_tracks: artwork.top_tracks ?? [],
+    discography: artwork.discography ?? [],
+    top_cities: artwork.top_cities ?? [],
+    updated_at: artwork.updated_at,
   };
+}
+
+function snapshotListenersFromHistory(artist: MarketArtist): number | null {
+  const history = Array.isArray(artist.listener_history) ? artist.listener_history : [];
+  const latest = history
+    .map((entry) => entry && typeof entry === "object" ? entry as Record<string, unknown> : null)
+    .filter((entry): entry is Record<string, unknown> => entry != null && typeof entry.date === "string")
+    .sort((a, b) => String(b.date).localeCompare(String(a.date)))[0];
+  return latest ? numberFromUnknown(latest.listeners) : null;
+}
+
+function latestHistoryDate(artist: MarketArtist): string | null {
+  const history = Array.isArray(artist.listener_history) ? artist.listener_history : [];
+  return history
+    .map((entry) => entry && typeof entry === "object" ? String((entry as Record<string, unknown>).date ?? "") : "")
+    .filter(Boolean)
+    .sort((a, b) => b.localeCompare(a))[0] ?? null;
+}
+
+function gainFromSnapshot(listeners: number | null, growth: number | null): number | null {
+  if (listeners == null || growth == null || growth === -100) return null;
+  return Math.round(listeners - listeners / (1 + growth / 100));
+}
+
+function daysSince(date: string): number | null {
+  const parsed = Date.parse(date);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.max(0, Math.floor((Date.now() - parsed) / (24 * 60 * 60 * 1000)));
+}
+
+function normalizeArtworkUrls(artist: MarketArtist): MarketArtist {
+  const raw = cleanUrl(artist.image_url_full) ?? cleanUrl(artist.image_url) ?? null;
+  const full = raw ? fullArtworkUrl(raw) : null;
+  const card = cleanUrl(artist.image_url_card) ?? (raw ? cardArtworkUrl(raw) : null);
+  return {
+    ...artist,
+    image_url: full ?? raw,
+    image_url_full: full ?? raw,
+    image_url_card: card,
+  };
+}
+
+function cleanUrl(value?: string | null): string | null {
+  const clean = value?.trim();
+  if (!clean || clean.toLowerCase() === "null") return null;
+  return clean;
+}
+
+function cardArtworkUrl(url: string): string {
+  return url
+    .replaceAll("0000e5eb", "00005174")
+    .replaceAll("0000f178", "00005174")
+    .replaceAll("1000x1000", "250x250")
+    .replaceAll("640x640", "250x250")
+    .replaceAll("500x500", "250x250")
+    .replaceAll("300x300", "250x250");
+}
+
+function fullArtworkUrl(url: string): string {
+  return url
+    .replaceAll("00005174", "0000e5eb")
+    .replaceAll("56x56", "1000x1000")
+    .replaceAll("250x250", "1000x1000")
+    .replaceAll("500x500", "1000x1000");
 }
 
 function extractPastspotListenerHistory(html: string): unknown[] {
@@ -993,6 +1243,11 @@ function maxNumber(a?: number | null, b?: number | null): number | null {
   if (a == null) return b ?? null;
   if (b == null) return a;
   return Math.max(a, b);
+}
+
+function maxOfNumbers(...values: Array<number | null | undefined>): number | null {
+  const clean = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  return clean.length === 0 ? null : Math.max(...clean);
 }
 
 function numberFromUnknown(value: unknown): number | null {

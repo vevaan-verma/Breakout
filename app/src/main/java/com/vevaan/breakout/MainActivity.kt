@@ -105,6 +105,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -577,7 +578,19 @@ internal data class ArtistUi(
     val latestReleaseType: String? = null,
     val releaseRecencyScore: Double? = null,
     val weeklyListenerGain: Long? = null,
-    val weeklyListenerGrowthPercent: Double? = null
+    val weeklyListenerGrowthPercent: Double? = null,
+    val imageUrlCard: String? = null,
+    val imageUrlFull: String? = null,
+    val currentListenersObservedAt: String? = null,
+    val currentListenersSource: String? = null,
+    val snapshotListeners: Long? = null,
+    val snapshotPreviousListeners: Long? = null,
+    val snapshotDate: String? = null,
+    val listenerChangeSinceSnapshot: Long? = null,
+    val listenerChangeSinceSnapshotPercent: Double? = null,
+    val daysSinceSnapshot: Int? = null,
+    val topCityName: String? = null,
+    val topCityListenersLabel: String? = null
 ) {
     val initials: String = name
         .split(" ")
@@ -651,10 +664,19 @@ internal data class ArtistUi(
         }
 
     val bestImageUrl: String?
-        get() = imageUrl
+        get() = (imageUrlFull ?: imageUrl)
             ?.replace("56x56", "1000x1000")
             ?.replace("250x250", "1000x1000")
             ?.replace("500x500", "1000x1000")
+
+    val cardImageUrl: String?
+        get() = (imageUrlCard ?: imageUrl)
+            ?.replace("0000e5eb", "00005174")
+            ?.replace("0000f178", "00005174")
+            ?.replace("1000x1000", "250x250")
+            ?.replace("640x640", "250x250")
+            ?.replace("500x500", "250x250")
+            ?.replace("300x300", "250x250")
 
     val projectedScore: Int
         get() {
@@ -2103,7 +2125,7 @@ internal object MusicArtistService {
 
 internal suspend fun prefetchArtistImages(context: Context, artists: List<ArtistUi>, limit: Int = 80) {
     artists
-        .mapNotNull { it.bestImageUrl }
+        .mapNotNull { it.cardImageUrl ?: it.bestImageUrl }
         .distinct()
         .take(limit)
         .forEach { imageUrl ->
@@ -2122,7 +2144,7 @@ internal object SupabaseLeagueService {
     @Volatile
     private var serverClockOffsetMs: Long = 0L
     private const val MarketArtistCacheSelect =
-        "spotify_id,name,image_url,listeners,weekly_listener_gain,weekly_listener_growth_percent,monthly_listener_change_percent,daily_listener_change,kworb_rank,source,score_status,provider_url,data_date,listener_history,top_tracks,discography,top_cities,updated_at"
+        "spotify_id,name,image_url,image_url_card,image_url_full,current_listeners,current_listeners_observed_at,current_listeners_source,snapshot_listeners,snapshot_previous_listeners,snapshot_date,listener_change_since_snapshot,listener_change_since_snapshot_percent,days_since_snapshot,listeners,weekly_listener_gain,weekly_listener_growth_percent,monthly_listener_change_percent,daily_listener_change,kworb_rank,source,score_status,provider_url,data_date,listener_history,top_tracks,discography,top_cities,updated_at"
 
     fun syncedNowMillis(): Long = System.currentTimeMillis() + serverClockOffsetMs
 
@@ -2885,6 +2907,20 @@ internal object SupabaseLeagueService {
         )
     }
 
+    suspend fun swapRosterSlots(accessToken: String, leagueId: String, from: RosterSlot, to: RosterSlot): Result<Unit> = runCatching {
+        if (accessToken.isBlank() || leagueId.isBlank() || !isOnlinePlayConfigured()) error("Sign in again to move artists.")
+        requestText(
+            url = "$baseUrl/rest/v1/rpc/swap_my_roster_slots",
+            method = "POST",
+            accessToken = accessToken,
+            body = JSONObject()
+                .put("target_league_id", leagueId)
+                .put("from_slot", from.name)
+                .put("to_slot", to.name)
+                .toString()
+        )
+    }
+
     suspend fun runLeagueWaivers(accessToken: String, leagueId: String): Result<Int> = runCatching {
         if (accessToken.isBlank() || leagueId.isBlank() || !isOnlinePlayConfigured()) error("Sign in again to run waivers.")
         requestText(
@@ -3115,10 +3151,22 @@ internal object SupabaseLeagueService {
     private fun JSONObject.toCachedMarketArtist(): ArtistUi {
         val weeklyGrowth = if (isNull("weekly_listener_growth_percent")) null else optDouble("weekly_listener_growth_percent")
         val listenerChange = if (isNull("monthly_listener_change_percent")) null else optDouble("monthly_listener_change_percent")
+        val topCity = optJSONArray("top_cities")?.optJSONObject(0)
+        val topCityName = topCity?.optionalString("name")
+            ?: topCity?.optionalString("city")
+            ?: topCity?.optionalString("text")?.substringBefore(" - ")?.trim()
+        val topCityListeners = topCity?.optionalString("value")
+            ?: topCity?.optionalString("listeners")
+            ?: topCity?.optionalString("secondary")
+            ?: topCity?.optionalString("tertiary")
         return ArtistUi(
             id = null,
             name = optionalString("name") ?: optionalString("display_name") ?: "Unknown Artist",
-            listeners = if (isNull("listeners")) null else optLong("listeners"),
+            listeners = when {
+                !isNull("current_listeners") -> optLong("current_listeners")
+                !isNull("listeners") -> optLong("listeners")
+                else -> null
+            },
             albumCount = null,
             imageUrl = optionalString("image_url"),
             source = optionalString("source") ?: "Cached market",
@@ -3128,7 +3176,19 @@ internal object SupabaseLeagueService {
             kworbDailyListenerChange = if (isNull("daily_listener_change")) null else optLong("daily_listener_change"),
             kworbDataUpdatedAt = optionalString("data_date") ?: optionalString("updated_at"),
             weeklyListenerGain = if (isNull("weekly_listener_gain")) null else optLong("weekly_listener_gain"),
-            weeklyListenerGrowthPercent = weeklyGrowth ?: listenerChange
+            weeklyListenerGrowthPercent = weeklyGrowth ?: listenerChange,
+            imageUrlCard = optionalString("image_url_card"),
+            imageUrlFull = optionalString("image_url_full") ?: optionalString("image_url"),
+            currentListenersObservedAt = optionalString("current_listeners_observed_at"),
+            currentListenersSource = optionalString("current_listeners_source"),
+            snapshotListeners = if (isNull("snapshot_listeners")) null else optLong("snapshot_listeners"),
+            snapshotPreviousListeners = if (isNull("snapshot_previous_listeners")) null else optLong("snapshot_previous_listeners"),
+            snapshotDate = optionalString("snapshot_date") ?: optionalString("data_date"),
+            listenerChangeSinceSnapshot = if (isNull("listener_change_since_snapshot")) null else optLong("listener_change_since_snapshot"),
+            listenerChangeSinceSnapshotPercent = if (isNull("listener_change_since_snapshot_percent")) null else optDouble("listener_change_since_snapshot_percent"),
+            daysSinceSnapshot = if (isNull("days_since_snapshot")) null else optInt("days_since_snapshot"),
+            topCityName = topCityName,
+            topCityListenersLabel = topCityListeners
         )
     }
 
@@ -3554,7 +3614,19 @@ internal object LocalBreakoutStore {
         latestReleaseType = optString("latestReleaseType").ifBlank { null },
         releaseRecencyScore = if (isNull("releaseRecencyScore")) null else optDouble("releaseRecencyScore"),
         weeklyListenerGain = if (isNull("weeklyListenerGain")) null else optLong("weeklyListenerGain"),
-        weeklyListenerGrowthPercent = if (isNull("weeklyListenerGrowthPercent")) null else optDouble("weeklyListenerGrowthPercent")
+        weeklyListenerGrowthPercent = if (isNull("weeklyListenerGrowthPercent")) null else optDouble("weeklyListenerGrowthPercent"),
+        imageUrlCard = optString("imageUrlCard").ifBlank { null },
+        imageUrlFull = optString("imageUrlFull").ifBlank { null },
+        currentListenersObservedAt = optString("currentListenersObservedAt").ifBlank { null },
+        currentListenersSource = optString("currentListenersSource").ifBlank { null },
+        snapshotListeners = if (isNull("snapshotListeners")) null else optLong("snapshotListeners"),
+        snapshotPreviousListeners = if (isNull("snapshotPreviousListeners")) null else optLong("snapshotPreviousListeners"),
+        snapshotDate = optString("snapshotDate").ifBlank { null },
+        listenerChangeSinceSnapshot = if (isNull("listenerChangeSinceSnapshot")) null else optLong("listenerChangeSinceSnapshot"),
+        listenerChangeSinceSnapshotPercent = if (isNull("listenerChangeSinceSnapshotPercent")) null else optDouble("listenerChangeSinceSnapshotPercent"),
+        daysSinceSnapshot = if (isNull("daysSinceSnapshot")) null else optInt("daysSinceSnapshot"),
+        topCityName = optString("topCityName").ifBlank { null },
+        topCityListenersLabel = optString("topCityListenersLabel").ifBlank { null }
     )
 
     private fun JSONObject.putStoredArtist(artist: ArtistUi) {
@@ -3596,6 +3668,18 @@ internal object LocalBreakoutStore {
         put("releaseRecencyScore", artist.releaseRecencyScore)
         put("weeklyListenerGain", artist.weeklyListenerGain)
         put("weeklyListenerGrowthPercent", artist.weeklyListenerGrowthPercent)
+        put("imageUrlCard", artist.imageUrlCard)
+        put("imageUrlFull", artist.imageUrlFull)
+        put("currentListenersObservedAt", artist.currentListenersObservedAt)
+        put("currentListenersSource", artist.currentListenersSource)
+        put("snapshotListeners", artist.snapshotListeners)
+        put("snapshotPreviousListeners", artist.snapshotPreviousListeners)
+        put("snapshotDate", artist.snapshotDate)
+        put("listenerChangeSinceSnapshot", artist.listenerChangeSinceSnapshot)
+        put("listenerChangeSinceSnapshotPercent", artist.listenerChangeSinceSnapshotPercent)
+        put("daysSinceSnapshot", artist.daysSinceSnapshot)
+        put("topCityName", artist.topCityName)
+        put("topCityListenersLabel", artist.topCityListenersLabel)
     }
 
     private fun JSONObject.toLeagueSettings(): LeagueSettingsUi = LeagueSettingsUi(
@@ -4195,6 +4279,17 @@ internal fun BreakoutApp(
     fun isDraftRoomTab(tab: BreakoutTab): Boolean =
         tab == BreakoutTab.Draft || tab == BreakoutTab.Market || tab == BreakoutTab.Roster
 
+    fun saveCurrentMarketScrollPosition() {
+        val key = if (marketSubmittedSearch.isNotBlank()) {
+            "search:${marketSubmittedSearch.trim().lowercase()}"
+        } else {
+            "filter:${(marketActiveFilter ?: marketStartFilter).name}"
+        }
+        marketScrollPositions = marketScrollPositions + (
+            key to "${marketListState.firstVisibleItemIndex}:${marketListState.firstVisibleItemScrollOffset}"
+        )
+    }
+
     fun navigateFromDraftAware(tab: BreakoutTab) {
         val active = league
         val currentDraftRoomOpen = isDraftRoomOpenForCurrentLeague()
@@ -4206,21 +4301,26 @@ internal fun BreakoutApp(
             closeDraftRoomWithAutoPick()
         }
         if (selectedTab == BreakoutTab.Market && tab == BreakoutTab.Market) {
+            val pressingSelectedTrending = marketSubmittedSearch.isBlank() && marketActiveFilter == MarketFilter.Trending
             marketQuery = ""
             marketSubmittedSearch = ""
             marketPreviousFilter = MarketFilter.Trending
             marketStartFilter = MarketFilter.Trending
             marketActiveFilter = MarketFilter.Trending
-            marketVisibleCount = 20
-            marketLastKey = null
             openMarketActionArtistKey = null
-            marketScrollPositions = marketScrollPositions + ("filter:${MarketFilter.Trending.name}" to "0:0")
-            marketResetTick++
+            if (pressingSelectedTrending) {
+                marketVisibleCount = 20
+                marketLastKey = null
+                marketScrollPositions = marketScrollPositions + ("filter:${MarketFilter.Trending.name}" to "0:0")
+                marketResetTick++
+            }
             selectedArtist = null
             draftPickMode = currentDraftRoomOpen
             joinError = null
-            scope.launch { marketListState.animateScrollToItem(0) }
             return
+        }
+        if (selectedTab == BreakoutTab.Market && tab != BreakoutTab.Market) {
+            saveCurrentMarketScrollPosition()
         }
         if (selectedTab != tab) previousTab = selectedTab
         selectedTab = tab
@@ -5164,17 +5264,18 @@ internal fun BreakoutApp(
                 } else {
                     val activeDraftRoomOpen = draftRoomOpen && draftRoomLeagueId == activeLeague.id
                     val visibleRoster = rosterForAccount(activeLeague)
-                    AnimatedContent(
-                        targetState = selectedTab,
-                        transitionSpec = {
-                            val forward = targetState.ordinal >= initialState.ordinal
-                            val enterOffset: (Int) -> Int = { width -> if (forward) width / 8 else -width / 8 }
-                            val exitOffset: (Int) -> Int = { width -> if (forward) -width / 10 else width / 10 }
-                            (fadeIn(animationSpec = tween(260)) + slideInHorizontally(animationSpec = tween(260), initialOffsetX = enterOffset)) togetherWith
-                                (fadeOut(animationSpec = tween(190)) + slideOutHorizontally(animationSpec = tween(190), targetOffsetX = exitOffset))
-                        },
-                        label = "breakoutPageTransition"
-                    ) { activeTab ->
+                    CompositionLocalProvider(LocalNavigationRefreshTick provides navigationRefreshTick) {
+                        AnimatedContent(
+                            targetState = selectedTab,
+                            transitionSpec = {
+                                val forward = targetState.ordinal >= initialState.ordinal
+                                val enterOffset: (Int) -> Int = { width -> if (forward) width / 8 else -width / 8 }
+                                val exitOffset: (Int) -> Int = { width -> if (forward) -width / 10 else width / 10 }
+                                (fadeIn(animationSpec = tween(260)) + slideInHorizontally(animationSpec = tween(260), initialOffsetX = enterOffset)) togetherWith
+                                    (fadeOut(animationSpec = tween(190)) + slideOutHorizontally(animationSpec = tween(190), targetOffsetX = exitOffset))
+                            },
+                            label = "breakoutPageTransition"
+                        ) { activeTab ->
                     when (activeTab) {
                         BreakoutTab.Home -> HomeScreen(
                             account = account,
@@ -5372,10 +5473,12 @@ internal fun BreakoutApp(
                                 roster = roster - slot
                             },
                             onMoveArtist = { from, to ->
-                                    val fromArtist = visibleRoster[from]
-                                    if (fromArtist != null) {
-                                        val toArtist = visibleRoster[to]
-                                        val updatedRoster = if (toArtist == null) {
+                                val fromArtist = visibleRoster[from]
+                                if (fromArtist != null) {
+                                    val toArtist = visibleRoster[to]
+                                    val previousRoster = roster
+                                    val previousDraftPicks = draftPicksByLeagueId[activeLeague.id].orEmpty()
+                                    val updatedRoster = if (toArtist == null) {
                                         (visibleRoster - from) + (to to fromArtist)
                                     } else {
                                         (visibleRoster - from - to) + (to to fromArtist) + (from to toArtist)
@@ -5394,6 +5497,30 @@ internal fun BreakoutApp(
                                             }
                                         }
                                     )
+                                    val updatedDraftPicks = draftPicksByLeagueId[activeLeague.id].orEmpty()
+                                    scope.launch {
+                                        val current = currentOnlineAccount()
+                                        if (current != null && activeLeague.id.isNotBlank()) {
+                                            SupabaseLeagueService.swapRosterSlots(current.accessToken, activeLeague.id, from, to)
+                                                .onFailure { error ->
+                                                    roster = previousRoster
+                                                    draftPicksByLeagueId = draftPicksByLeagueId + (activeLeague.id to previousDraftPicks)
+                                                    LocalBreakoutStore.saveRoster(
+                                                        context,
+                                                        previousRoster,
+                                                        activeLeague.id.ifBlank { activeLeague.inviteCode }
+                                                    )
+                                                    Toast.makeText(
+                                                        context,
+                                                        error.message ?: "Could not save roster move.",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                }
+                                                .onSuccess {
+                                                    draftPicksByLeagueId = draftPicksByLeagueId + (activeLeague.id to updatedDraftPicks)
+                                                }
+                                        }
+                                    }
                                 }
                             },
                             onRunWaivers = { runWaiversForLeague(activeLeague, visibleRoster) },
@@ -5640,6 +5767,7 @@ internal fun BreakoutApp(
                                 roster = emptyMap()
                             }
                         )
+                    }
                     }
                     }
 

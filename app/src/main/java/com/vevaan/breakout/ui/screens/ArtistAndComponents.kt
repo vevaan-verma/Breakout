@@ -388,6 +388,8 @@ internal fun ArtistDetailScreen(
 
 @Composable
 private fun ArtistHeroMetricGrid(shownArtist: ArtistUi, marketScoreArtist: ArtistUi) {
+    val snapshotLabel = shownArtist.snapshotDate?.displaySnapshotDate()?.let { "Week ending $it" } ?: "Completed snapshot"
+    val gainLabel = shownArtist.snapshotDate?.displaySnapshotDate()?.let { "Since $it" } ?: "Since snapshot"
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
@@ -397,15 +399,15 @@ private fun ArtistHeroMetricGrid(shownArtist: ArtistUi, marketScoreArtist: Artis
             horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
         ) {
             StatTile(
-                "Audience",
+                "Listeners",
                 shownArtist.listeners?.formatCompact() ?: "Sizing Up",
-                shownArtist.tag,
+                shownArtist.currentAudienceDetail(),
                 Modifier.weight(1f)
             )
             StatTile(
                 "Breakout",
                 marketScoreArtist.breakoutScore(null).formatScore(),
-                "Synced market score",
+                "Market rating",
                 Modifier.weight(1f)
             )
         }
@@ -414,17 +416,38 @@ private fun ArtistHeroMetricGrid(shownArtist: ArtistUi, marketScoreArtist: Artis
             horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
         ) {
             StatTile(
-                "Weekly Growth",
+                "Listener Growth",
                 shownArtist.weeklyListenerGrowthPercent?.formatSignedPercent() ?: "Pending",
-                "Past week",
+                "Last full week",
                 Modifier.weight(1f)
             )
             StatTile(
                 "Weekly Gain",
-                shownArtist.weeklyListenerGain?.takeIf { it > 100L }?.formatSignedCompact() ?: "Pending",
-                "Listeners",
+                shownArtist.weeklyListenerGain?.takeIf { kotlin.math.abs(it) > 100L }?.formatSignedCompact() ?: "Pending",
+                snapshotLabel,
                 Modifier.weight(1f)
             )
+        }
+        if (shownArtist.listenerChangeSinceSnapshot != null || shownArtist.listenerChangeSinceSnapshotPercent != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
+            ) {
+                StatTile(
+                    "Since Snapshot",
+                    shownArtist.listenerChangeSinceSnapshotPercent?.formatSignedPercent()
+                        ?: shownArtist.listenerChangeSinceSnapshot?.formatSignedCompact()
+                        ?: "Pending",
+                    gainLabel,
+                    Modifier.weight(1f)
+                )
+                StatTile(
+                    "Snapshot Age",
+                    shownArtist.daysSinceSnapshot?.let { "$it days" } ?: "Unknown",
+                    shownArtist.snapshotDate?.displaySnapshotDate() ?: "No snapshot date",
+                    Modifier.weight(1f)
+                )
+            }
         }
     }
 }
@@ -461,6 +484,12 @@ private fun ArtistMarketIntelCard(shownArtist: ArtistUi, marketScoreArtist: Arti
         }
         shownArtist.releaseRecencyScore?.let { ArtistSignalBar("Release Recency", it, BreakoutSecondary) }
         ScoreLine("Market Value", shownArtist.price)
+        shownArtist.topCityName?.let { city ->
+            ScoreLine(
+                "Top City",
+                listOfNotNull(city, shownArtist.topCityListenersLabel).joinToString(" - ")
+            )
+        }
         ScoreLine("Fantasy Read", shownArtist.marketNote)
     }
 }
@@ -1619,7 +1648,9 @@ internal fun EmptySlotArtwork() {
 @Composable
 internal fun ArtistArtwork(artist: ArtistUi, size: androidx.compose.ui.unit.Dp) {
     val context = LocalContext.current
-    val artworkUrl = artist.bestImageUrl
+    val density = LocalDensity.current
+    val imageSizePx = with(density) { size.roundToPx().coerceAtLeast(72) }
+    val artworkUrl = if (size <= 96.dp) artist.cardImageUrl else artist.bestImageUrl
     Box(
         modifier = Modifier
             .size(size)
@@ -1631,6 +1662,8 @@ internal fun ArtistArtwork(artist: ArtistUi, size: androidx.compose.ui.unit.Dp) 
             AsyncImage(
                 model = ImageRequest.Builder(context)
                     .data(artworkUrl)
+                    .size(imageSizePx, imageSizePx)
+                    .allowRgb565(size <= 96.dp)
                     .crossfade(false)
                     .diskCachePolicy(CachePolicy.ENABLED)
                     .memoryCachePolicy(CachePolicy.ENABLED)
@@ -3559,30 +3592,40 @@ internal fun ArtistUi.discoverySortValue(): Double {
 internal fun ArtistUi.marketMomentumLabel(): String =
     when {
         weeklyListenerGrowthPercent != null && weeklyListenerGain != null ->
-            if (weeklyListenerGain > 100L) {
-                "${weeklyListenerGrowthPercent.formatSignedPercent()} week • ${weeklyListenerGain.formatSignedCompact()}"
+            if (kotlin.math.abs(weeklyListenerGain) > 100L) {
+                "${weeklyListenerGrowthPercent.formatSignedPercent()} last week • ${weeklyListenerGain.formatSignedCompact()}"
             } else {
-                "${weeklyListenerGrowthPercent.formatSignedPercent()} this week"
+                "${weeklyListenerGrowthPercent.formatSignedPercent()} last week"
             }
         weeklyListenerGrowthPercent != null ->
-            "${weeklyListenerGrowthPercent.formatSignedPercent()} this week"
-        weeklyListenerGain != null && weeklyListenerGain > 100L ->
-            "${weeklyListenerGain.formatSignedCompact()} this week"
+            "${weeklyListenerGrowthPercent.formatSignedPercent()} last week"
+        weeklyListenerGain != null && kotlin.math.abs(weeklyListenerGain) > 100L ->
+            "${weeklyListenerGain.formatSignedCompact()} last week"
         else -> compactRead
     }
 
 internal fun ArtistUi.artistDetailSubtitle(): String =
     when {
-        weeklyListenerGrowthPercent != null && weeklyListenerGain != null && kotlin.math.abs(weeklyListenerGain) > 100L ->
-            "${weeklyListenerGrowthPercent.formatSignedPercent()} this week • ${weeklyListenerGain.formatSignedCompact()} listeners"
-        weeklyListenerGrowthPercent != null ->
-            "${weeklyListenerGrowthPercent.formatSignedPercent()} this week"
-        weeklyListenerGain != null && kotlin.math.abs(weeklyListenerGain) > 100L ->
-            "${weeklyListenerGain.formatSignedCompact()} listeners this week"
-        listeners != null ->
-            "${listeners.formatCompact()} monthly listeners"
+        snapshotDate != null ->
+            "Weekly snapshot ${snapshotDate.displaySnapshotDate()} • ${marketNote}"
+        source.isNotBlank() ->
+            marketNote
         else -> "Market data pending"
     }
+
+internal fun ArtistUi.currentAudienceDetail(): String =
+    when {
+        currentListenersSource?.contains("Pastspot search", ignoreCase = true) == true -> "Current Spotify listeners"
+        currentListenersObservedAt != null -> "Current listeners"
+        currentListenersSource != null -> tag
+        else -> tag
+    }
+
+internal fun String.displaySnapshotDate(): String =
+    runCatching {
+        val date = java.time.LocalDate.parse(take(10))
+        date.format(java.time.format.DateTimeFormatter.ofPattern("MMM d"))
+    }.getOrDefault(take(10))
 
 internal fun List<ArtistUi>.marketDistinct(): List<ArtistUi> =
     groupBy { it.name.artistKey() }
@@ -3989,8 +4032,8 @@ internal fun List<ArtistUi>.strategicDraftRecommendation(
 
 internal fun normalizedAudienceFloor(listeners: Long?): Double {
     val scale = listeners ?: return 0.0
-    val normalized = ((log10(max(scale.toDouble(), 100_000.0)) - 6.0) / 2.15).coerceIn(0.0, 1.0)
-    return normalized.pow(1.45)
+    val normalized = ((log10(max(scale.toDouble(), 100_000.0)) - 5.0) / 3.2).coerceIn(0.0, 1.0)
+    return normalized.pow(1.25)
 }
 
 internal fun ArtistUi.riskScore(): Double {
@@ -4172,7 +4215,13 @@ internal fun String.displayKworbDate(): String =
     runCatching {
         DateTimeFormatter.ofPattern("MMM d, yyyy")
             .format(LocalDate.parse(this, DateTimeFormatter.ofPattern("yyyy/MM/dd")))
-    }.getOrDefault(this)
+    }.getOrElse {
+        runCatching {
+            OffsetDateTime.parse(this)
+                .atZoneSameInstant(ZoneId.systemDefault())
+                .format(DateTimeFormatter.ofPattern("MMM d, yyyy 'at' h:mm a"))
+        }.getOrDefault(take(10))
+    }
 
 internal fun Long.formatLocalDateTime(): String =
     runCatching {
