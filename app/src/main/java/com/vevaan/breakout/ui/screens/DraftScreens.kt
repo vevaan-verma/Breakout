@@ -839,7 +839,7 @@ internal fun DraftRoomScreen(
                         horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
                     ) {
                         FilterChip(selected = selectedFilter == null, onClick = { selectedFilter = null }, label = { Text("All") })
-                        MarketFilter.entries.forEach { filter ->
+                        MarketFilter.entries.filterNot { it == MarketFilter.Waivered }.forEach { filter ->
                             FilterChip(selected = selectedFilter == filter, onClick = { selectedFilter = filter }, label = { Text(filter.label) })
                         }
                     }
@@ -1253,7 +1253,12 @@ internal fun DraftSummaryPickTicket(
         }
         Column(horizontalAlignment = Alignment.End) {
             Text(formatPickDuration(pick.secondsToPick), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Black)
-            Text("Clock", color = BreakoutTextSecondary, style = MaterialTheme.typography.labelSmall)
+            Text(
+                if (pick.autoPicked) "Auto" else "Clock",
+                color = if (pick.autoPicked) WaiverAccent else BreakoutTextSecondary,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = if (pick.autoPicked) FontWeight.Black else FontWeight.Normal
+            )
         }
     }
 }

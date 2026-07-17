@@ -395,6 +395,7 @@ internal fun MemberDetailDialog(
     canViewRoster: Boolean,
     onDismiss: () -> Unit,
     onViewRoster: () -> Unit,
+    onTrade: () -> Unit,
     onTransfer: () -> Unit,
     onKick: () -> Unit
 ) {
@@ -443,7 +444,10 @@ internal fun MemberDetailDialog(
                     }
                 }
                 if (canViewRoster) {
-                    SecondaryButton(text = "View Roster", modifier = Modifier.fillMaxWidth(), onClick = onViewRoster)
+                    Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)) {
+                        SecondaryButton(text = "View Roster", modifier = Modifier.weight(1f), onClick = onViewRoster)
+                        AccentButton(text = "Trade", modifier = Modifier.weight(1f), onClick = onTrade)
+                    }
                 }
                 if (canManage) {
                     AccentButton(text = "Make Manager", modifier = Modifier.fillMaxWidth(), onClick = onTransfer)
@@ -542,7 +546,7 @@ internal fun MemberRosterPickRow(pick: DraftPickUi, onClick: () -> Unit) {
         ArtistArtwork(artist = pick.artist, size = BreakoutDimensions.ArtworkList)
         Column(modifier = Modifier.weight(1f)) {
             Text(pick.artist.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("${pick.slot.label} - Pick ${pick.pickNumber}", color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium)
+            Text("Overall #${pick.pickNumber}", color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium)
         }
         TagLabel(pick.artist.tag)
     }
@@ -768,10 +772,8 @@ internal fun TopTrackCard(
 @Composable
 internal fun ChartSignalsCard(artist: ArtistUi) {
     val hasChartData = artist.kworbRank != null ||
-        artist.kworbDailyListenerChange != null ||
         artist.kworbTotalStreams != null ||
         artist.kworbDailyStreams != null ||
-        artist.kworbTopSongTitle != null ||
         artist.kworbPeakListeners != null
     if (!hasChartData) return
     BreakoutCard(contentPadding = PaddingValues(BreakoutDimensions.HeroCardPadding)) {
@@ -784,19 +786,17 @@ internal fun ChartSignalsCard(artist: ArtistUi) {
                 modifier = Modifier.weight(1f)
             )
             StatTile(
-                label = "Audience Move",
-                value = artist.kworbDailyListenerChange?.formatSignedCompact() ?: "--",
-                caption = "Today vs yesterday",
+                label = "Daily Streams",
+                value = artist.kworbDailyStreams?.formatCompact() ?: "--",
+                caption = artist.kworbLeadDailyStreams?.let { "${it.formatCompact()} as lead artist" } ?: "Artist stream pace",
                 modifier = Modifier.weight(1f)
             )
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.CardSpacing)) {
-            StatTile(
-                label = "Daily Streams",
-                value = artist.kworbDailyStreams?.formatSignedCompact() ?: "--",
-                caption = artist.kworbLeadDailyStreams?.let { "${it.formatCompact()} as lead artist" } ?: "Artist streams today",
-                modifier = Modifier.fillMaxWidth()
-            )
+        artist.kworbPeakListeners?.let { peak ->
+            ScoreLine("Peak Listeners", peak.formatCompact())
+        }
+        artist.kworbDataUpdatedAt?.let { updated ->
+            ScoreLine("Chart Updated", updated.displayKworbDate())
         }
     }
 }
@@ -831,11 +831,14 @@ internal fun StreamSplitCard(artist: ArtistUi) {
 internal fun ArtistHistoryTimelineCard(
     draftedDetail: String?,
     droppedAtMillis: Long?,
-    waiveredAtMillis: Long? = null
+    waiveredAtMillis: Long? = null,
+    waiveredDetail: String? = null
 ) {
     val events = buildList {
         draftedDetail?.let { add(Triple("Drafted", it.removePrefix("Drafted by "), BreakoutPrimary)) }
-        waiveredAtMillis?.let { add(Triple("Waivered", it.formatLocalDateTime(), WaiverAccent)) }
+        if (waiveredAtMillis != null || waiveredDetail != null) {
+            add(Triple("Waiver Claimed", waiveredDetail ?: "by You via waivers • ${waiveredAtMillis?.formatLocalDateTime().orEmpty()}", WaiverAccent))
+        }
         droppedAtMillis?.let { add(Triple("Dropped", it.formatLocalDateTime(), BreakoutCoral)) }
     }
     if (events.isEmpty()) return

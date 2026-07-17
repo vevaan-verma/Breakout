@@ -2,29 +2,15 @@
 
 import android.Manifest
 import android.app.AlarmManager
-import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.os.Bundle
 import android.os.Build
-import android.os.SystemClock
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
-import android.widget.Toast
-import androidx.activity.compose.BackHandler
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -37,7 +23,6 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -55,10 +40,6 @@ import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -71,20 +52,15 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimePicker
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.animation.AnimatedVisibility
@@ -94,9 +70,11 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
@@ -104,22 +82,18 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
-import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -130,19 +104,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
-import androidx.compose.ui.input.nestedscroll.NestedScrollSource
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -151,10 +119,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.Velocity
 import kotlin.math.roundToInt
 import coil.compose.AsyncImage
-import coil.imageLoader
+import coil.request.CachePolicy
 import coil.request.ImageRequest
 import com.vevaan.breakout.core.designsystem.BreakoutDimensions
 import com.vevaan.breakout.ui.theme.BreakoutCoral
@@ -166,32 +133,24 @@ import com.vevaan.breakout.ui.theme.BreakoutSurfaceVariant
 import com.vevaan.breakout.ui.theme.BreakoutTextPrimary
 import com.vevaan.breakout.ui.theme.BreakoutTextSecondary
 import com.vevaan.breakout.ui.theme.BreakoutTheme
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.withContext
-import org.json.JSONArray
 import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
-import java.net.URLEncoder
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.ZoneOffset
+import java.time.DayOfWeek
 import java.time.Instant
 import java.time.format.DateTimeFormatter
-import java.time.format.DateTimeParseException
+import java.time.temporal.TemporalAdjusters
 import java.time.temporal.ChronoUnit
-import java.util.Base64
 import kotlin.math.log10
 import kotlin.math.max
+import kotlin.math.pow
 import kotlin.random.Random
 
 @Composable
@@ -204,6 +163,7 @@ internal fun ArtistDetailScreen(
     draftedHistoryLabel: String?,
     droppedAtMillis: Long?,
     waiveredAtMillis: Long? = null,
+    waiveredHistoryLabel: String? = null,
     isWaiverQueued: Boolean,
     canAddToRoster: Boolean,
     canQueueWaiver: Boolean,
@@ -238,12 +198,13 @@ internal fun ArtistDetailScreen(
         }
     }
     val shownArtist = detailArtist
+    val marketScoreArtist = artist
     Box(modifier = Modifier.fillMaxSize()) {
         AnimatedVisibility(
             modifier = Modifier.fillMaxSize(),
             visible = !detailReady,
             enter = fadeIn(animationSpec = tween(220)) + slideInVertically(animationSpec = tween(220)) { it / 16 },
-            exit = slideOutVertically(animationSpec = tween(260)) { -it / 18 }
+            exit = slideOutVertically(animationSpec = tween(420)) { -it }
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
             ArtistLoadingScreen()
@@ -261,17 +222,39 @@ internal fun ArtistDetailScreen(
         AnimatedVisibility(
             modifier = Modifier.fillMaxSize(),
             visible = detailReady && detailContentVisible,
-            enter = fadeIn() + slideInVertically { it / 12 },
-            exit = slideOutVertically { it / 18 }
+            enter = fadeIn(animationSpec = tween(260)) + slideInHorizontally(animationSpec = tween(260)) { it / 8 },
+            exit = fadeOut(animationSpec = tween(190)) + slideOutHorizontally(animationSpec = tween(190)) { it / 10 }
         ) {
             ScreenColumn {
                 Box(modifier = Modifier.height(44.dp))
-                ArtistArtwork(artist = shownArtist, size = 260.dp)
-                Text(shownArtist.name, style = MaterialTheme.typography.headlineLarge)
-                Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.CardSpacing)) {
-                    StatTile("Audience", shownArtist.listeners?.formatCompact() ?: "Sizing Up", shownArtist.tag, Modifier.weight(1f))
-                    StatTile("Breakout", shownArtist.breakoutScore(null).formatScore(), "Score", Modifier.weight(1f))
+                Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    ArtistArtwork(artist = shownArtist, size = 232.dp)
                 }
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.xs)
+                ) {
+                    Text(
+                        shownArtist.name,
+                        style = MaterialTheme.typography.headlineLarge,
+                        textAlign = TextAlign.Center,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        shownArtist.artistDetailSubtitle(),
+                        color = BreakoutTextSecondary,
+                        style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                ArtistHeroMetricGrid(shownArtist = shownArtist, marketScoreArtist = marketScoreArtist)
             AnimatedVisibility(
                 visible = isInRoster || isWaiverQueued,
                 enter = fadeIn() + expandVertically(),
@@ -295,6 +278,7 @@ internal fun ArtistDetailScreen(
                     }
                 )
             }
+            ArtistMarketIntelCard(shownArtist = shownArtist, marketScoreArtist = marketScoreArtist)
             BreakoutCard {
                 Text("Draft Profile", style = MaterialTheme.typography.titleLarge)
                 ScoreLine("Role", shownArtist.tag)
@@ -309,17 +293,6 @@ internal fun ArtistDetailScreen(
                 shownArtist.albumCount?.let { ScoreLine("Catalog", "$it releases") }
                 ScoreLine("Read", shownArtist.marketNote)
                 ScoreLine("Risk", shownArtist.riskLabel)
-            }
-            BreakoutCard {
-                Text("Scoring Signals", style = MaterialTheme.typography.titleLarge)
-                shownArtist.projectionRows().forEach { row ->
-                    val help = scoringSignalInfo(row.label)
-                    if (help != null) {
-                        SignalMetricRow(label = row.label, value = row.value, detail = row.detail, info = help)
-                    } else {
-                        ScoreLine(row.label, row.value)
-                    }
-                }
             }
             if (weeklyPoints.isNotEmpty()) {
                 ArtistWeeklyPointsCard(weeklyPoints)
@@ -338,7 +311,8 @@ internal fun ArtistDetailScreen(
                 ArtistHistoryTimelineCard(
                     draftedDetail = draftedHistoryLabel,
                     droppedAtMillis = droppedAtMillis,
-                    waiveredAtMillis = waiveredAtMillis
+                    waiveredAtMillis = waiveredAtMillis,
+                    waiveredDetail = waiveredHistoryLabel
                 )
             }
             if (!canAddToRoster && draftStatus == DraftStatus.Live) {
@@ -371,7 +345,7 @@ internal fun ArtistDetailScreen(
                 waiver = canQueueWaiver || isWaiverQueued,
                 waiverCancel = isWaiverQueued,
                 size = 64.dp,
-                solid = true,
+                solid = false,
                 onClick = when {
                     isInRoster -> ({ confirmRemove = true })
                     isWaiverQueued -> onCancelWaiver
@@ -411,6 +385,117 @@ internal fun ArtistDetailScreen(
         }
     }
 }
+
+@Composable
+private fun ArtistHeroMetricGrid(shownArtist: ArtistUi, marketScoreArtist: ArtistUi) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
+        ) {
+            StatTile(
+                "Audience",
+                shownArtist.listeners?.formatCompact() ?: "Sizing Up",
+                shownArtist.tag,
+                Modifier.weight(1f)
+            )
+            StatTile(
+                "Breakout",
+                marketScoreArtist.breakoutScore(null).formatScore(),
+                "Synced market score",
+                Modifier.weight(1f)
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
+        ) {
+            StatTile(
+                "Weekly Growth",
+                shownArtist.weeklyListenerGrowthPercent?.formatSignedPercent() ?: "Pending",
+                "Past week",
+                Modifier.weight(1f)
+            )
+            StatTile(
+                "Weekly Gain",
+                shownArtist.weeklyListenerGain?.takeIf { it > 100L }?.formatSignedCompact() ?: "Pending",
+                "Listeners",
+                Modifier.weight(1f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ArtistMarketIntelCard(shownArtist: ArtistUi, marketScoreArtist: ArtistUi) {
+    val breakout = marketScoreArtist.breakoutScore(null)
+    val fantasyPreview = marketScoreArtist.leagueWeekScore(1)
+    val audienceSignal = shownArtist.listeners
+        ?.let { normalizedAudienceFloor(it) * 100.0 }
+        ?: 0.0
+    val growthSignal = shownArtist.weeklyListenerGrowthPercent
+        ?.let { (45.0 + it.coerceIn(-25.0, 175.0) * 0.26).coerceIn(0.0, 100.0) }
+        ?: 0.0
+    BreakoutCard {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Fantasy Read", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                TagLabel(shownArtist.riskLabel)
+            }
+        }
+        ArtistSignalBar("Breakout", breakout, BreakoutPrimary)
+        ArtistSignalBar("Weekly Points", fantasyPreview, BreakoutSecondary)
+        ArtistSignalBar("Audience Floor", audienceSignal, BreakoutCoral)
+        if (shownArtist.weeklyListenerGrowthPercent != null || shownArtist.weeklyListenerGain != null) {
+            ArtistSignalBar("Growth Spike", growthSignal, BreakoutPrimary)
+        }
+        shownArtist.releaseRecencyScore?.let { ArtistSignalBar("Release Recency", it, BreakoutSecondary) }
+        ScoreLine("Market Value", shownArtist.price)
+        ScoreLine("Fantasy Read", shownArtist.marketNote)
+    }
+}
+
+@Composable
+private fun ArtistSignalBar(label: String, value: Double, color: Color) {
+    Column(verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.xs)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(label, color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium)
+            Text(value.formatScore(), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(8.dp)
+                .clip(CircleShape)
+                .background(BreakoutSurfaceVariant.copy(alpha = 0.72f))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth((value.coerceIn(0.0, 100.0) / 100.0).toFloat())
+                    .height(8.dp)
+                    .clip(CircleShape)
+                    .background(color)
+            )
+        }
+    }
+}
+
+internal fun Double.formatSignedPercent(): String =
+    if (this >= 0.0) "+${"%.1f".format(this)}%" else "${"%.1f".format(this)}%"
 
 @Composable
 internal fun ArtistWeeklyPointsCard(weeklyPoints: List<ArtistWeekPointsUi>) {
@@ -658,23 +743,6 @@ internal fun LeagueDrawer(
                     DrawerNavRow("Standings", BreakoutTab.Standings, onNavigate)
                     DrawerNavRow("Account", BreakoutTab.Account, onNavigate)
                 }
-                BreakoutCard {
-                    Text("Current League", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    Text(activeLeague.name, color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    DangerButton(text = leaveActionText, onClick = { confirmLeave = true })
-                    if (confirmLeave) {
-                        ConfirmActionCard(
-                            title = leaveConfirmTitle,
-                            detail = leaveConfirmDetail,
-                            confirmText = if (leaveActionText == "Delete League") "Delete" else "Leave",
-                            onCancel = { confirmLeave = false },
-                            onConfirm = {
-                                confirmLeave = false
-                                onLeaveLeague()
-                            }
-                        )
-                    }
-                }
             }
             if (activeLeague == null) {
                 BreakoutCard {
@@ -763,19 +831,43 @@ internal fun LeagueChoiceDialog(
                 .padding(horizontal = BreakoutDimensions.lg)
                 .fillMaxWidth()
                 .widthIn(max = 430.dp),
-            color = Color(0xFF171B25),
-            shape = RoundedCornerShape(28.dp),
-            border = BorderStroke(1.dp, BreakoutPrimary.copy(alpha = 0.42f)),
+            color = Color(0xFF141824),
+            shape = RoundedCornerShape(30.dp),
+            border = BorderStroke(1.dp, BreakoutPrimary.copy(alpha = 0.46f)),
             tonalElevation = 14.dp
         ) {
             Column(
-                modifier = Modifier.padding(BreakoutDimensions.xl),
+                modifier = Modifier
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                BreakoutPrimary.copy(alpha = 0.12f),
+                                Color.Transparent
+                            )
+                        )
+                    )
+                    .padding(BreakoutDimensions.xl),
                 verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.md)
             ) {
-                Text("Add League", color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
-                Text("Create a fresh league or join one with an invite code.", color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium)
-                DrawerActionChoice("Create new league", onCreate)
-                DrawerActionChoice("Join existing league", onJoin)
+                Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.md), verticalAlignment = Alignment.CenterVertically) {
+                    BreakoutMark(size = 54.dp)
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Add League", color = Color.White, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                        Text("Start fresh or enter an invite code.", color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                DrawerActionChoice(
+                    label = "Create new league",
+                    detail = "Name it, invite friends, then set draft rules.",
+                    accent = BreakoutPrimary,
+                    onClick = onCreate
+                )
+                DrawerActionChoice(
+                    label = "Join existing league",
+                    detail = "Use a 6-character invite code.",
+                    accent = WaiverAccent,
+                    onClick = onJoin
+                )
                 SecondaryButton("Cancel", modifier = Modifier.fillMaxWidth(), onClick = onDismiss)
             }
         }
@@ -783,19 +875,37 @@ internal fun LeagueChoiceDialog(
 }
 
 @Composable
-internal fun DrawerActionChoice(label: String, onClick: () -> Unit) {
-    Row(
+internal fun DrawerActionChoice(label: String, detail: String, accent: Color, onClick: () -> Unit) {
+    Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(BreakoutDimensions.SmallCornerRadius))
-            .background(BreakoutSurfaceVariant.copy(alpha = 0.62f))
-            .clickable(onClick = onClick)
-            .padding(horizontal = BreakoutDimensions.md, vertical = BreakoutDimensions.sm),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
+            .clip(RoundedCornerShape(BreakoutDimensions.CardCornerRadius))
+            .clickable(onClick = onClick),
+        color = BreakoutSurfaceVariant.copy(alpha = 0.66f),
+        shape = RoundedCornerShape(BreakoutDimensions.CardCornerRadius),
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.36f))
     ) {
-        Text(label, color = BreakoutTextPrimary, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-        Text(">", color = BreakoutPrimary, fontWeight = FontWeight.Black)
+        Row(
+            modifier = Modifier.padding(BreakoutDimensions.md),
+            horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.md),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(CircleShape)
+                    .background(accent.copy(alpha = 0.16f))
+                    .border(1.dp, accent.copy(alpha = 0.52f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("+", color = accent, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
+            }
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(label, color = BreakoutTextPrimary, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Black)
+                Text(detail, color = BreakoutTextSecondary, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+            Text(">", color = accent, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
+        }
     }
 }
 
@@ -811,6 +921,7 @@ internal fun LeagueActionDialog(
     onDismiss: () -> Unit,
     onAction: () -> Unit
 ) {
+    val focusManager = LocalFocusManager.current
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -821,18 +932,48 @@ internal fun LeagueActionDialog(
                 .fillMaxWidth()
                 .widthIn(max = 430.dp)
                 .imePadding(),
-            color = Color(0xFF171B25),
-            shape = RoundedCornerShape(28.dp),
-            border = BorderStroke(1.dp, BreakoutPrimary.copy(alpha = 0.42f)),
+            color = Color(0xFF141824),
+            shape = RoundedCornerShape(30.dp),
+            border = BorderStroke(1.dp, BreakoutPrimary.copy(alpha = 0.46f)),
             tonalElevation = 12.dp
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                BreakoutPrimary.copy(alpha = 0.10f),
+                                Color.Transparent
+                            )
+                        )
+                    )
+                    .pointerInput(Unit) {
+                        detectTapGestures(onTap = { focusManager.clearFocus() })
+                    }
                     .padding(BreakoutDimensions.xl),
                 verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.md)
             ) {
-                Text(title, color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.md), verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .background(BreakoutPrimary.copy(alpha = 0.16f))
+                            .border(1.dp, BreakoutPrimary.copy(alpha = 0.48f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(if (inputLabel == "League Name") "+" else "#", color = BreakoutPrimary, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(title, color = Color.White, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                        Text(
+                            if (inputLabel == "League Name") "Create a new draft room." else "Enter your league invite code.",
+                            color = BreakoutTextSecondary,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                }
                 StyledTextField(
                     value = value,
                     onValueChange = onValueChange,
@@ -944,7 +1085,7 @@ internal fun MenuButton(modifier: Modifier = Modifier, onClick: () -> Unit) {
 @Composable
 internal fun BreakoutMark(size: Dp) {
     Image(
-        painter = painterResource(id = R.drawable.breakout_app_icon),
+        painter = painterResource(id = R.drawable.breakout_app_icon_small),
         contentDescription = "Breakout",
         modifier = Modifier
             .size(size)
@@ -1140,6 +1281,37 @@ internal fun ArtistRow(
         else -> 0f
     }
     val cardOffset by animateFloatAsState(targetValue = targetOffset, label = "artistActionReveal")
+    val stateAccentTarget = when {
+        isWaiverQueued -> WaiverAccent
+        isInRoster -> BreakoutPrimary
+        isDraftedByOther -> DraftedOtherAccent
+        else -> BreakoutOutline.copy(alpha = 0.62f)
+    }
+    val stateAccent by animateColorAsState(
+        targetValue = stateAccentTarget,
+        animationSpec = tween(durationMillis = 260),
+        label = "artistRowStateAccent"
+    )
+    val stateBorder by animateColorAsState(
+        targetValue = when {
+            isWaiverQueued -> WaiverAccent.copy(alpha = 0.9f)
+            isInRoster -> BreakoutPrimary.copy(alpha = 0.78f)
+            isDraftedByOther -> DraftedOtherAccent.copy(alpha = 0.78f)
+            else -> BreakoutOutline.copy(alpha = 0.55f)
+        },
+        animationSpec = tween(durationMillis = 260),
+        label = "artistRowStateBorder"
+    )
+    val statusTextColor by animateColorAsState(
+        targetValue = when {
+            isInRoster -> BreakoutPrimary
+            isDraftedByOther -> DraftedOtherAccent
+            isWaiverQueued -> WaiverAccent
+            else -> BreakoutTextSecondary
+        },
+        animationSpec = tween(durationMillis = 260),
+        label = "artistRowStatusColor"
+    )
     Box(
         modifier = modifier
             .fillMaxWidth()
@@ -1204,15 +1376,7 @@ internal fun ArtistRow(
                         }
                     )
                 },
-        border = BorderStroke(
-            1.dp,
-            when {
-                isWaiverQueued -> WaiverAccent.copy(alpha = 0.9f)
-                isInRoster -> BreakoutPrimary.copy(alpha = 0.78f)
-                isDraftedByOther -> DraftedOtherAccent.copy(alpha = 0.78f)
-                else -> BreakoutOutline.copy(alpha = 0.55f)
-            }
-        )
+        border = BorderStroke(1.dp, stateBorder)
         ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1224,14 +1388,7 @@ internal fun ArtistRow(
                     .width(4.dp)
                     .height(72.dp)
                     .clip(RoundedCornerShape(999.dp))
-                    .background(
-                        when {
-                            isWaiverQueued -> WaiverAccent
-                            isInRoster -> BreakoutPrimary
-                            isDraftedByOther -> DraftedOtherAccent
-                            else -> BreakoutOutline.copy(alpha = 0.62f)
-                        }
-                    )
+                    .background(stateAccent)
             )
             ArtistArtwork(artist = artist, size = BreakoutDimensions.ArtworkCard)
             Column(
@@ -1254,13 +1411,8 @@ internal fun ArtistRow(
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    statusLabel ?: if (isWaiverQueued) "Waiver #${waiverQueuePosition ?: ""}".trim() else artist.compactRead,
-                    color = when {
-                        isInRoster -> BreakoutPrimary
-                        isDraftedByOther -> DraftedOtherAccent
-                        isWaiverQueued -> WaiverAccent
-                        else -> BreakoutTextSecondary
-                    },
+                    statusLabel ?: if (isWaiverQueued) "Waiver #${waiverQueuePosition ?: ""}".trim() else artist.marketMomentumLabel(),
+                    color = statusTextColor,
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = if (statusLabel != null || isWaiverQueued) FontWeight.Bold else FontWeight.Normal,
                     maxLines = 1,
@@ -1466,6 +1618,8 @@ internal fun EmptySlotArtwork() {
 
 @Composable
 internal fun ArtistArtwork(artist: ArtistUi, size: androidx.compose.ui.unit.Dp) {
+    val context = LocalContext.current
+    val artworkUrl = artist.bestImageUrl
     Box(
         modifier = Modifier
             .size(size)
@@ -1473,9 +1627,15 @@ internal fun ArtistArtwork(artist: ArtistUi, size: androidx.compose.ui.unit.Dp) 
             .background(Brush.linearGradient(listOf(BreakoutPrimary, BreakoutCoral, BreakoutSecondary))),
         contentAlignment = Alignment.Center
     ) {
-        if (!artist.imageUrl.isNullOrBlank()) {
+        if (!artworkUrl.isNullOrBlank()) {
             AsyncImage(
-                model = artist.bestImageUrl,
+                model = ImageRequest.Builder(context)
+                    .data(artworkUrl)
+                    .crossfade(false)
+                    .diskCachePolicy(CachePolicy.ENABLED)
+                    .memoryCachePolicy(CachePolicy.ENABLED)
+                    .networkCachePolicy(CachePolicy.ENABLED)
+                    .build(),
                 contentDescription = "${artist.name} artist image",
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop
@@ -1490,14 +1650,66 @@ internal fun ArtistArtwork(artist: ArtistUi, size: androidx.compose.ui.unit.Dp) 
 internal fun FilterChipRow(
     filters: List<MarketFilter>,
     selected: MarketFilter?,
-    onSelected: (MarketFilter?) -> Unit
+    onSelected: (MarketFilter?) -> Unit,
+    searchLabel: String? = null,
+    onSearchSelected: (() -> Unit)? = null
 ) {
+    val chipScrollState = rememberScrollState()
+    val configuration = LocalConfiguration.current
+    val density = LocalDensity.current
+    LaunchedEffect(searchLabel, selected, filters, configuration.screenWidthDp) {
+        if (searchLabel != null) {
+            chipScrollState.animateScrollTo(0)
+        } else if (selected != null) {
+            delay(60)
+            val selectedIndex = filters.indexOf(selected).coerceAtLeast(0)
+            val chipWidthPx = with(density) { 106.dp.roundToPx() }
+            val gapPx = with(density) { BreakoutDimensions.sm.roundToPx() }
+            val viewportPx = with(density) { configuration.screenWidthDp.dp.roundToPx() }
+            val target = (selectedIndex * (chipWidthPx + gapPx)) - ((viewportPx - chipWidthPx) / 2)
+            chipScrollState.animateScrollTo(target.coerceIn(0, chipScrollState.maxValue))
+        }
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .horizontalScroll(rememberScrollState()),
+            .horizontalScroll(chipScrollState),
         horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
     ) {
+        AnimatedVisibility(
+            visible = searchLabel != null,
+            enter = fadeIn(animationSpec = tween(180)) + expandHorizontally(animationSpec = tween(220)),
+            exit = fadeOut(animationSpec = tween(140)) + shrinkHorizontally(animationSpec = tween(180))
+        ) {
+            val background by animateColorAsState(
+                targetValue = BreakoutPrimary.copy(alpha = 0.30f),
+                label = "marketSearchFilterBackground"
+            )
+            val border by animateColorAsState(
+                targetValue = BreakoutPrimary.copy(alpha = 0.72f),
+                label = "marketSearchFilterBorder"
+            )
+            Box(
+                modifier = Modifier
+                    .height(48.dp)
+                    .widthIn(min = 106.dp, max = 180.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(background)
+                    .border(1.dp, border, RoundedCornerShape(16.dp))
+                    .clickable { onSearchSelected?.invoke() }
+                    .padding(horizontal = BreakoutDimensions.md),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    searchLabel.orEmpty(),
+                    color = BreakoutPrimary,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
         filters.forEach { filter ->
             val isSelected = filter == selected
             val background by animateColorAsState(
@@ -1656,7 +1868,7 @@ internal fun AlertNoticeCard(
         colors = CardDefaults.cardColors(containerColor = BreakoutSurfaceVariant.copy(alpha = 0.72f)),
         border = BorderStroke(1.dp, accent.copy(alpha = 0.42f))
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(
@@ -1665,51 +1877,55 @@ internal fun AlertNoticeCard(
                     )
                 )
                 .padding(BreakoutDimensions.CardPadding),
-            horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.md),
-            verticalAlignment = Alignment.Top
+            verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.md)
         ) {
-            Box(
-                modifier = Modifier
-                    .size(38.dp)
-                    .clip(CircleShape)
-                    .background(accent.copy(alpha = 0.18f))
-                    .border(1.dp, accent.copy(alpha = 0.45f), CircleShape),
-                contentAlignment = Alignment.Center
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.md),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(symbol, color = accent, fontWeight = FontWeight.Black)
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(accent.copy(alpha = 0.18f))
+                        .border(1.dp, accent.copy(alpha = 0.45f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(symbol, color = accent, fontWeight = FontWeight.Black)
+                }
+                Text(
+                    title,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
             }
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
-            ) {
-                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                messages.forEach { message ->
-                    Row(
+            messages.forEach { message ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(BreakoutDimensions.SmallCornerRadius))
+                        .background(BreakoutSurface.copy(alpha = 0.42f))
+                        .then(if (onMessageClick != null) Modifier.clickable { onMessageClick(message) } else Modifier)
+                        .padding(horizontal = BreakoutDimensions.md, vertical = BreakoutDimensions.sm),
+                    horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(BreakoutDimensions.SmallCornerRadius))
-                            .background(BreakoutSurface.copy(alpha = 0.42f))
-                            .then(if (onMessageClick != null) Modifier.clickable { onMessageClick(message) } else Modifier)
-                            .padding(BreakoutDimensions.sm),
-                        horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .width(4.dp)
-                                .height(28.dp)
-                                .clip(RoundedCornerShape(999.dp))
-                                .background(accent)
-                        )
-                        Text(
-                            message,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.weight(1f),
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(accent)
+                    )
+                    Text(
+                        message,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
         }
@@ -1805,24 +2021,26 @@ internal fun SignalInfoDialog(
 ) {
     Dialog(onDismissRequest = onDismiss) {
         Surface(
-            modifier = Modifier.widthIn(max = 380.dp),
-            color = BreakoutSurface.copy(alpha = 0.99f),
-            shape = RoundedCornerShape(28.dp),
-            border = BorderStroke(1.dp, BreakoutOutline.copy(alpha = 0.78f)),
+            modifier = Modifier
+                .fillMaxWidth(0.94f)
+                .padding(horizontal = BreakoutDimensions.lg)
+                .widthIn(max = 520.dp),
+            color = BreakoutSurface.copy(alpha = 0.995f),
+            shape = RoundedCornerShape(30.dp),
+            border = BorderStroke(1.dp, BreakoutPrimary.copy(alpha = 0.38f)),
             tonalElevation = 10.dp
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(BreakoutPrimary.copy(alpha = 0.10f), Color.Transparent)
+                        )
+                    )
                     .padding(BreakoutDimensions.xl),
                 verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.md)
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(width = 64.dp, height = 4.dp)
-                        .clip(CircleShape)
-                        .background(BreakoutPrimary)
-                )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.md),
@@ -1853,37 +2071,44 @@ internal fun SignalInfoDialog(
                             .size(36.dp)
                             .clip(CircleShape)
                             .background(BreakoutSurfaceVariant.copy(alpha = 0.72f))
+                            .border(1.dp, BreakoutOutline.copy(alpha = 0.34f), CircleShape)
                             .clickable(onClick = onDismiss),
                         contentAlignment = Alignment.Center
                     ) {
                         Text("x", color = BreakoutTextSecondary, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                     }
                 }
-                Surface(
-                    color = BreakoutSurfaceVariant.copy(alpha = 0.62f),
-                    shape = RoundedCornerShape(BreakoutDimensions.SmallCornerRadius),
-                    border = BorderStroke(1.dp, BreakoutOutline.copy(alpha = 0.35f))
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
                 ) {
-                    Column(
-                        modifier = Modifier.padding(BreakoutDimensions.md),
-                        verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
-                    ) {
-                        details.forEach { detail ->
+                    details.forEachIndexed { index, detail ->
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            color = BreakoutSurfaceVariant.copy(alpha = 0.64f),
+                            shape = RoundedCornerShape(BreakoutDimensions.SmallCornerRadius),
+                            border = BorderStroke(1.dp, BreakoutOutline.copy(alpha = 0.28f))
+                        ) {
                             Row(
+                                modifier = Modifier.padding(BreakoutDimensions.md),
                                 horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm),
-                                verticalAlignment = Alignment.Top
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Box(
                                     modifier = Modifier
-                                        .padding(top = 7.dp)
-                                        .size(6.dp)
+                                        .size(24.dp)
                                         .clip(CircleShape)
-                                        .background(BreakoutSecondary)
-                                )
+                                        .background(BreakoutSecondary.copy(alpha = 0.16f))
+                                        .border(1.dp, BreakoutSecondary.copy(alpha = 0.42f), CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text((index + 1).toString(), color = BreakoutSecondary, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Black)
+                                }
                                 Text(
                                     detail,
+                                    modifier = Modifier.weight(1f),
                                     color = MaterialTheme.colorScheme.onSurface,
-                                    style = MaterialTheme.typography.bodyMedium
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    lineHeight = 20.sp
                                 )
                             }
                         }
@@ -1896,14 +2121,19 @@ internal fun SignalInfoDialog(
                     horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Box(
+                    Surface(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(BreakoutDimensions.SmallCornerRadius))
-                            .clickable(onClick = onDismiss)
-                            .padding(horizontal = BreakoutDimensions.sm, vertical = 4.dp),
-                        contentAlignment = Alignment.Center
+                            .height(46.dp)
+                            .widthIn(min = 132.dp)
+                            .clip(RoundedCornerShape(999.dp))
+                            .clickable(onClick = onDismiss),
+                        color = BreakoutSecondary.copy(alpha = 0.18f),
+                        shape = RoundedCornerShape(999.dp),
+                        border = BorderStroke(1.dp, BreakoutSecondary.copy(alpha = 0.44f))
                     ) {
-                        Text("Done", color = BreakoutSecondary, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                        Box(contentAlignment = Alignment.Center) {
+                            Text("Done", color = BreakoutSecondary, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
@@ -1917,15 +2147,10 @@ internal fun scoringSignalInfo(label: String): List<String>? = when (label) {
         "Runs from 0 to 100",
         "Higher means a stronger breakout profile"
     )
-    "Audience Move" -> listOf(
-        "Uses daily listener movement from chart data when available",
-        "Runs from 0 to 100",
-        "50 is flat; above 50 means gains, below 50 means losses"
-    )
     "Daily Streams" -> listOf(
-        "Uses daily stream movement from chart data when available",
-        "Runs from 0 to 100",
-        "50 is flat; above 50 means stronger listening activity"
+        "Uses current daily stream pace from chart data when available",
+        "Rewards meaningful listening activity without making huge artists unbeatable",
+        "Pairs best with weekly listener growth"
     )
     "Track Signal" -> listOf(
         "Measures current song momentum from top-track popularity",
@@ -1954,6 +2179,7 @@ internal fun StyledTextField(
     enabled: Boolean = true,
     maxLength: Int = Int.MAX_VALUE,
     keyboardType: KeyboardType = KeyboardType.Text,
+    imeAction: ImeAction = ImeAction.Next,
     visualTransformation: VisualTransformation = VisualTransformation.None,
     keyboardActions: KeyboardActions = KeyboardActions.Default
 ) {
@@ -1994,7 +2220,7 @@ internal fun StyledTextField(
         ),
         keyboardOptions = KeyboardOptions(
             keyboardType = keyboardType,
-            imeAction = ImeAction.Next
+            imeAction = imeAction
         ),
         keyboardActions = keyboardActions,
         visualTransformation = visualTransformation
@@ -2129,12 +2355,23 @@ internal fun ArtistLoadingScreen() {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
+            .background(
+                Brush.verticalGradient(
+                    listOf(
+                        MaterialTheme.colorScheme.background,
+                        BreakoutSecondary.copy(alpha = 0.08f),
+                        MaterialTheme.colorScheme.background
+                    )
+                )
+            )
             .statusBarsPadding()
             .padding(BreakoutDimensions.ScreenHorizontalPadding),
         contentAlignment = Alignment.Center
     ) {
-        BreakoutCard(contentPadding = PaddingValues(BreakoutDimensions.xl)) {
+        BreakoutCard(
+            contentPadding = PaddingValues(BreakoutDimensions.xl),
+            border = BorderStroke(1.dp, BreakoutSecondary.copy(alpha = 0.42f))
+        ) {
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -2147,9 +2384,9 @@ internal fun ArtistLoadingScreen() {
                         trackColor = BreakoutSurfaceVariant,
                         strokeWidth = 8.dp
                     )
-                    Text("A", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black, color = BreakoutSecondary)
+                    BreakoutMark(size = 54.dp)
                 }
-                Text("Loading Artist", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("Loading Artist", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
                 Text(
                     "Preparing profile, signals, and artwork",
                     modifier = Modifier.fillMaxWidth(),
@@ -2165,7 +2402,7 @@ internal fun ArtistLoadingScreen() {
 }
 
 @Composable
-internal fun MarketInitializingScreen(onOpenMenu: () -> Unit) {
+internal fun MarketInitializingScreen() {
     val loadingLines = remember {
         listOf(
             "Opening the artist pool",
@@ -2179,28 +2416,34 @@ internal fun MarketInitializingScreen(onOpenMenu: () -> Unit) {
             "Finalizing market"
         )
     }
-    var lineIndex by remember { mutableStateOf(0) }
+    var lineIndex by remember { mutableStateOf(MarketLoadingLineMemory.index.coerceIn(0, loadingLines.lastIndex)) }
     LaunchedEffect(Unit) {
         while (lineIndex < loadingLines.lastIndex) {
-            delay(1850)
+            delay(820)
             lineIndex += 1
+            MarketLoadingLineMemory.index = lineIndex
         }
     }
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
+            .background(
+                Brush.verticalGradient(
+                    listOf(
+                        MaterialTheme.colorScheme.background,
+                        BreakoutPrimary.copy(alpha = 0.08f),
+                        MaterialTheme.colorScheme.background
+                    )
+                )
+            )
             .statusBarsPadding()
             .padding(BreakoutDimensions.ScreenHorizontalPadding),
         contentAlignment = Alignment.Center
     ) {
-        MenuButton(
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(top = BreakoutDimensions.xs),
-            onClick = onOpenMenu
-        )
-        BreakoutCard(contentPadding = PaddingValues(BreakoutDimensions.xl)) {
+        BreakoutCard(
+            contentPadding = PaddingValues(BreakoutDimensions.xl),
+            border = BorderStroke(1.dp, BreakoutPrimary.copy(alpha = 0.42f))
+        ) {
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -2213,9 +2456,9 @@ internal fun MarketInitializingScreen(onOpenMenu: () -> Unit) {
                         trackColor = BreakoutSurfaceVariant,
                         strokeWidth = 8.dp
                     )
-                    Text("M", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black, color = BreakoutPrimary)
+                    BreakoutMark(size = 54.dp)
                 }
-                Text("Market Loading", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("Loading Market", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -2237,6 +2480,10 @@ internal fun MarketInitializingScreen(onOpenMenu: () -> Unit) {
             }
         }
     }
+}
+
+private object MarketLoadingLineMemory {
+    var index: Int = 0
 }
 
 @Composable
@@ -2874,7 +3121,10 @@ internal fun cleanVisibleError(rawMessage: String?): String {
     return when {
         message.isBlank() -> ""
         isAuthFailure(message) -> "Your session expired. Please log in again."
-        message.trim().startsWith("{") -> "Something went wrong. Please try again."
+        message.contains("PGRST102", ignoreCase = true) ||
+            message.contains("empty or invalid json", ignoreCase = true) ->
+            "The waiver request could not be sent cleanly. Please try again."
+        message.trim().startsWith("{") -> normalizedErrorText(message).ifBlank { "Something went wrong. Please try again." }
         else -> message
     }
 }
@@ -3139,6 +3389,7 @@ internal fun friendlyTradeError(rawMessage: String?): String {
         message.contains("not a member", ignoreCase = true) -> "That member is not available for trades."
         message.contains("not active", ignoreCase = true) -> "That trade is no longer active."
         message.contains("expired", ignoreCase = true) -> "That trade offer has expired."
+        message.contains("8 active outgoing", ignoreCase = true) -> "You already have 8 active outgoing trades. Cancel one before sending another."
         message.contains("no longer has", ignoreCase = true) ||
             message.contains("already moved", ignoreCase = true) -> "One of those artists moved rosters. Refresh trades and try again."
         message.contains("does not fit", ignoreCase = true) ||
@@ -3173,9 +3424,11 @@ internal fun claimableSlotFor(
     ?: waiverReplacementOptionsFor(artist, roster, settings).firstOrNull()?.first
 
 internal fun preferredSlotsFor(artist: ArtistUi): List<RosterSlot> = when {
-    artist.isDeepCutEligible() -> deepCutSlots() + risingSlots() + wildcardSlots() + benchSlots()
-    artist.isRisingEligible() -> risingSlots() + wildcardSlots() + benchSlots()
-    else -> headlinerSlots() + benchSlots()
+    artist.isHeadlinerEligible() -> headlinerSlots() + benchSlots()
+    artist.isMainstayEligible() -> wildcardSlots() + benchSlots()
+    artist.isRisingEligible() -> risingSlots() + benchSlots()
+    artist.isDeepCutEligible() -> deepCutSlots() + benchSlots()
+    else -> benchSlots()
 }
 
 internal fun RosterSlot.canHold(artist: ArtistUi): Boolean = when (this) {
@@ -3190,7 +3443,7 @@ internal fun RosterSlot.canHold(artist: ArtistUi): Boolean = when (this) {
     RosterSlot.WildcardOne,
     RosterSlot.WildcardTwo,
     RosterSlot.WildcardThree,
-    RosterSlot.WildcardFour -> !artist.isHeadlinerEligible()
+    RosterSlot.WildcardFour -> artist.isMainstayEligible()
     RosterSlot.BenchOne,
     RosterSlot.BenchTwo,
     RosterSlot.BenchThree,
@@ -3208,6 +3461,38 @@ internal fun activeRosterSlots(settings: LeagueSettingsUi): List<RosterSlot> =
         risingSlots().take(settings.risingSlots) +
         deepCutSlots().take(settings.deepCutSlots) +
         benchSlots().take(settings.benchSlots)
+
+internal fun rebalanceRosterForRoles(
+    settings: LeagueSettingsUi,
+    artists: List<ArtistUi>
+): Map<RosterSlot, ArtistUi> {
+    val remaining = artists.marketDistinct().toMutableList()
+    val balanced = linkedMapOf<RosterSlot, ArtistUi>()
+
+    fun fillSlots(slots: List<RosterSlot>, eligible: (ArtistUi) -> Boolean) {
+        slots.filter { it in activeRosterSlots(settings) }.forEach { slot ->
+            val selected = remaining
+                .filter(eligible)
+                .maxByOrNull { it.breakoutScore(null) }
+                ?: return@forEach
+            balanced[slot] = selected
+            remaining.removeAll { it.name.equals(selected.name, ignoreCase = true) }
+        }
+    }
+
+    fillSlots(headlinerSlots().take(settings.headlinerSlots)) { it.isHeadlinerEligible() }
+    fillSlots(wildcardSlots().take(settings.wildcardSlots)) { it.isMainstayEligible() }
+    fillSlots(risingSlots().take(settings.risingSlots)) { it.isRisingEligible() }
+    fillSlots(deepCutSlots().take(settings.deepCutSlots)) { it.isDeepCutEligible() }
+
+    benchSlots().take(settings.benchSlots).forEach { slot ->
+        val selected = remaining.maxByOrNull { it.breakoutScore(null) } ?: return@forEach
+        balanced[slot] = selected
+        remaining.removeAll { it.name.equals(selected.name, ignoreCase = true) }
+    }
+
+    return balanced
+}
 
 internal fun headlinerSlots(): List<RosterSlot> = listOf(
     RosterSlot.HeadlinerOne,
@@ -3246,16 +3531,20 @@ internal fun benchSlots(): List<RosterSlot> = listOf(
 )
 
 internal fun ArtistUi.isHeadlinerEligible(): Boolean =
-    (listeners ?: 0L) >= 50_000_000 || (kworbRank ?: Int.MAX_VALUE) <= 100
+    (listeners ?: 0L) >= 40_000_000
+
+internal fun ArtistUi.isMainstayEligible(): Boolean =
+    !isHeadlinerEligible() && (listeners ?: 0L) >= 15_000_000L
 
 internal fun ArtistUi.isRisingEligible(): Boolean =
-    !isHeadlinerEligible() && (listeners ?: 0L) in 1_000_000L until 12_000_000L
+    !isHeadlinerEligible() && (listeners ?: 0L) in 1_000_000L until 15_000_000L
 
 internal fun ArtistUi.isDeepCutEligible(): Boolean =
     !isHeadlinerEligible() && (listeners ?: Long.MAX_VALUE) < 1_000_000
 
 internal fun ArtistUi.marketBucket(): MarketFilter = when {
     isHeadlinerEligible() -> MarketFilter.Headliners
+    isMainstayEligible() -> MarketFilter.Wildcards
     isDeepCutEligible() -> MarketFilter.DeepCuts
     isRisingEligible() -> MarketFilter.Rising
     else -> MarketFilter.Wildcards
@@ -3266,6 +3555,34 @@ internal fun ArtistUi.discoverySortValue(): Double {
     val distance = kotlin.math.abs(scale - 250_000) / 250_000.0
     return (1.0 - distance).coerceIn(0.0, 1.0) * 100
 }
+
+internal fun ArtistUi.marketMomentumLabel(): String =
+    when {
+        weeklyListenerGrowthPercent != null && weeklyListenerGain != null ->
+            if (weeklyListenerGain > 100L) {
+                "${weeklyListenerGrowthPercent.formatSignedPercent()} week • ${weeklyListenerGain.formatSignedCompact()}"
+            } else {
+                "${weeklyListenerGrowthPercent.formatSignedPercent()} this week"
+            }
+        weeklyListenerGrowthPercent != null ->
+            "${weeklyListenerGrowthPercent.formatSignedPercent()} this week"
+        weeklyListenerGain != null && weeklyListenerGain > 100L ->
+            "${weeklyListenerGain.formatSignedCompact()} this week"
+        else -> compactRead
+    }
+
+internal fun ArtistUi.artistDetailSubtitle(): String =
+    when {
+        weeklyListenerGrowthPercent != null && weeklyListenerGain != null && kotlin.math.abs(weeklyListenerGain) > 100L ->
+            "${weeklyListenerGrowthPercent.formatSignedPercent()} this week • ${weeklyListenerGain.formatSignedCompact()} listeners"
+        weeklyListenerGrowthPercent != null ->
+            "${weeklyListenerGrowthPercent.formatSignedPercent()} this week"
+        weeklyListenerGain != null && kotlin.math.abs(weeklyListenerGain) > 100L ->
+            "${weeklyListenerGain.formatSignedCompact()} listeners this week"
+        listeners != null ->
+            "${listeners.formatCompact()} monthly listeners"
+        else -> "Market data pending"
+    }
 
 internal fun List<ArtistUi>.marketDistinct(): List<ArtistUi> =
     groupBy { it.name.artistKey() }
@@ -3278,8 +3595,14 @@ internal fun List<ArtistUi>.marketDistinct(): List<ArtistUi> =
             )
         }
 
-internal fun ArtistUi.stableListKey(): String =
-    spotifyId?.let { "spotify:$it" } ?: id?.let { "id:$it" } ?: "name:${name.artistKey()}:${listeners ?: 0L}:${imageUrl.orEmpty().hashCode()}"
+internal fun ArtistUi.stableListKey(): String {
+    val cleanSpotifyId = spotifyId
+        ?.trim()
+        ?.takeUnless { it.isBlank() || it.equals("null", ignoreCase = true) }
+    return cleanSpotifyId?.let { "spotify:$it" }
+        ?: id?.let { "id:$it" }
+        ?: "name:${name.artistKey()}:${listeners ?: 0L}:${imageUrl.orEmpty().hashCode()}"
+}
 
 internal fun ArtistUi.breakoutScore(snapshot: SnapshotUi?): Double {
     val trackSignal = (trackPopularity ?: spotifyPopularity ?: 50).coerceIn(0, 100).toDouble()
@@ -3287,7 +3610,8 @@ internal fun ArtistUi.breakoutScore(snapshot: SnapshotUi?): Double {
     val recency = (snapshot?.releaseRecencyScore ?: releaseRecencyScore ?: 45.0).coerceIn(0.0, 100.0)
     val audience = normalizedAudienceFloor(listeners) * 100.0
     val kworbDailySignal = kworbDailyListenerChange?.let { signedLogSignal(it) }
-    val streamSignal = kworbDailyStreams?.let { dailyStreamSignal(it) }
+    val weeklyGrowthSignal = weeklyListenerGrowthPercent?.let { (45.0 + it.coerceIn(-25.0, 175.0) * 0.26).coerceIn(20.0, 95.0) }
+    val streamSignal = kworbDailyStreams?.let { dailyStreamSignal(it, listeners) }
     val peakSignal = kworbPeakListeners?.let { normalizedAudienceFloor(it) * 100.0 }
     val discovery = when {
         listeners == null -> 42.0
@@ -3301,17 +3625,19 @@ internal fun ArtistUi.breakoutScore(snapshot: SnapshotUi?): Double {
         kworbDailySignal != null -> kworbDailySignal
         else -> audience
     }
-    val fallbackScore = (trackSignal * 0.19) +
-        (artistSignal * 0.14) +
+    val fallbackScore = (trackSignal * 0.17) +
+        (artistSignal * 0.13) +
         (audience * 0.15) +
-        (audienceTrend * 0.23) +
+        (audienceTrend * 0.20) +
         ((streamSignal ?: trackSignal) * 0.13) +
         (discovery * 0.08) +
-        (recency * 0.08)
+        (recency * 0.07) +
+        ((weeklyGrowthSignal ?: audienceTrend) * 0.07)
     val availableSignalCount = listOfNotNull(
         trackPopularity,
         spotifyPopularity,
         kworbDailyListenerChange,
+        weeklyListenerGrowthPercent,
         kworbDailyStreams,
         kworbPeakListeners,
         releaseRecencyScore
@@ -3339,11 +3665,13 @@ internal fun ArtistUi.breakoutScore(snapshot: SnapshotUi?): Double {
     )
     val spotifyFollowerGrowth = kworbDailySignal?.let { (it * 0.70) + (followerGrowth * 0.30) } ?: followerGrowth
     val streamGrowth = streamSignal ?: lastFmPlayGrowth
+    val weeklyGrowth = weeklyGrowthSignal ?: spotifyFollowerGrowth
     val growthScore = spotifyFollowerGrowth * 0.30 +
-        trackGrowth * 0.25 +
-        lastFmListenerGrowth * 0.20 +
+        trackGrowth * 0.20 +
+        lastFmListenerGrowth * 0.16 +
         streamGrowth * 0.15 +
-        recency * 0.10
+        recency * 0.09 +
+        weeklyGrowth * 0.10
 
     return (growthScore * 0.72 + confidenceAdjustedScore * 0.28).coerceIn(0.0, 100.0)
 }
@@ -3369,10 +3697,14 @@ internal fun signedLogSignal(value: Long): Double {
     }.coerceIn(0.0, 100.0)
 }
 
-internal fun dailyStreamSignal(value: Long): Double {
+internal fun dailyStreamSignal(value: Long, listeners: Long? = null): Double {
     if (value <= 0L) return 0.0
     val logValue = log10(value.toDouble() + 1.0)
-    return ((logValue - 4.0) / 4.8 * 100.0).coerceIn(0.0, 98.0)
+    val absolute = ((logValue - 4.0) / 4.8 * 100.0).coerceIn(0.0, 92.0)
+    val relative = listeners
+        ?.takeIf { it > 0L }
+        ?.let { ((value.toDouble() / it.toDouble()) * 1_800.0).coerceIn(0.0, 100.0) }
+    return if (relative == null) absolute else (absolute * 0.58 + relative * 0.42).coerceIn(0.0, 98.0)
 }
 
 internal fun JSONObject.nullableInt(key: String): Int? = if (isNull(key) || !has(key)) null else optInt(key)
@@ -3387,12 +3719,16 @@ internal fun ArtistUi.projectionRows(): List<SignalRowUi> {
     return listOf(
         SignalRowUi("Breakout Score", breakoutScore(null).formatScore()),
         SignalRowUi(
-            "Audience Move",
-            kworbDailyListenerChange?.let { signedLogSignal(it).formatScore() } ?: "Not Available"
+            "Weekly Growth",
+            weeklyListenerGrowthPercent?.formatSignedPercent() ?: "Not Available"
+        ),
+        SignalRowUi(
+            "Weekly Gain",
+            weeklyListenerGain?.formatSignedCompact() ?: "Not Available"
         ),
         SignalRowUi(
             "Daily Streams",
-            kworbDailyStreams?.let { dailyStreamSignal(it).formatScore() } ?: "Not Available"
+            kworbDailyStreams?.let { dailyStreamSignal(it, listeners).formatScore() } ?: "Not Available"
         ),
         SignalRowUi(
             "Track Signal",
@@ -3653,7 +3989,8 @@ internal fun List<ArtistUi>.strategicDraftRecommendation(
 
 internal fun normalizedAudienceFloor(listeners: Long?): Double {
     val scale = listeners ?: return 0.0
-    return ((log10(max(scale.toDouble(), 10_000.0)) - 4.0) / 5.0).coerceIn(0.0, 1.0)
+    val normalized = ((log10(max(scale.toDouble(), 100_000.0)) - 6.0) / 2.15).coerceIn(0.0, 1.0)
+    return normalized.pow(1.45)
 }
 
 internal fun ArtistUi.riskScore(): Double {
@@ -3692,10 +4029,17 @@ internal fun weeklyPointsForArtist(artist: ArtistUi, league: LeagueUi): List<Art
     }
 }
 
-private fun currentLeagueWeek(league: LeagueUi): Int {
-    val scheduledAt = parseDraftDateTime(league.settings.draftDateLabel) ?: return 1
-    val daysSinceDraft = ChronoUnit.DAYS.between(scheduledAt.toLocalDate(), LocalDateTime.now().toLocalDate()).coerceAtLeast(0)
-    return ((daysSinceDraft / 7) + 1).toInt().coerceIn(1, league.settings.seasonWeeks.coerceAtLeast(1))
+internal fun currentLeagueWeek(league: LeagueUi): Int {
+    val weekOneStart = leagueWeekOneStartDate(league) ?: return 1
+    val daysSinceWeekOne = ChronoUnit.DAYS.between(weekOneStart, LocalDate.now()).coerceAtLeast(0)
+    return ((daysSinceWeekOne / 7) + 1).toInt().coerceIn(1, league.settings.seasonWeeks.coerceAtLeast(1))
+}
+
+internal fun leagueWeekOneStartDate(league: LeagueUi): LocalDate? {
+    val scheduledAt = parseDraftDateTime(league.settings.draftDateLabel) ?: return null
+    return scheduledAt.toLocalDate()
+        .plusDays(1)
+        .with(TemporalAdjusters.nextOrSame(DayOfWeek.MONDAY))
 }
 
 private fun ArtistUi.leagueWeekScore(week: Int): Double {
@@ -3703,13 +4047,15 @@ private fun ArtistUi.leagueWeekScore(week: Int): Double {
     val wave = (((identitySeed + week * 37) % 19) - 9) / 100.0
     val breakout = breakoutScore(null)
     val audienceMove = kworbDailyListenerChange?.let { signedLogSignal(it) } ?: normalizedAudienceFloor(listeners) * 100.0
-    val streams = kworbDailyStreams?.let { dailyStreamSignal(it) } ?: ((trackPopularity ?: spotifyPopularity ?: 50).toDouble())
+    val weeklyGrowth = weeklyListenerGrowthPercent?.let { (42.0 + it.coerceIn(-30.0, 220.0) * 0.30).coerceIn(12.0, 108.0) } ?: audienceMove
+    val weeklyGain = weeklyListenerGain?.let { signedLogSignal(it) } ?: audienceMove
+    val streams = kworbDailyStreams?.let { dailyStreamSignal(it, listeners) } ?: ((trackPopularity ?: spotifyPopularity ?: 50).toDouble())
     val riskSwing = when (riskLabel) {
         "High variance" -> wave * 32.0
         "Medium variance" -> wave * 21.0
         else -> wave * 12.0
     }
-    return ((breakout * 0.46) + (audienceMove * 0.24) + (streams * 0.18) + (projectedScore * 0.12) + riskSwing)
+    return ((breakout * 0.30) + (weeklyGrowth * 0.25) + (weeklyGain * 0.16) + (audienceMove * 0.12) + (streams * 0.11) + (projectedScore * 0.06) + riskSwing)
         .coerceIn(0.0, 100.0)
 }
 
@@ -3862,6 +4208,7 @@ internal fun MarketPreview() {
         val previewListState = rememberLazyListState()
         var previewQuery by rememberSaveable { mutableStateOf("") }
         var previewFilter by rememberSaveable { mutableStateOf<MarketFilter?>(MarketFilter.Headliners) }
+        var previewSubmittedSearch by rememberSaveable { mutableStateOf("") }
         var previewPreviousFilter by rememberSaveable { mutableStateOf(MarketFilter.Headliners) }
         var previewMarketState by remember { mutableStateOf<MarketState>(MarketState.Loading) }
         var previewSnapshots by remember { mutableStateOf<Map<String, SnapshotUi>>(emptyMap()) }
@@ -3883,6 +4230,8 @@ internal fun MarketPreview() {
             startFilter = MarketFilter.Headliners,
             query = previewQuery,
             onQueryChange = { previewQuery = it },
+            submittedSearch = previewSubmittedSearch,
+            onSubmittedSearchChange = { previewSubmittedSearch = it },
             activeFilter = previewFilter,
             onActiveFilterChange = { previewFilter = it },
             previousFilter = previewPreviousFilter,
@@ -3893,8 +4242,11 @@ internal fun MarketPreview() {
             onSnapshotsChange = { previewSnapshots = it },
             visibleCount = previewVisibleCount,
             onVisibleCountChange = { previewVisibleCount = it },
+            resetTick = 0,
             lastMarketKey = previewLastKey,
             onLastMarketKeyChange = { previewLastKey = it },
+            scrollPositions = emptyMap(),
+            onScrollPositionChange = { _, _ -> },
             loadedMarketKey = previewLoadedKey,
             onLoadedMarketKeyChange = { previewLoadedKey = it },
             openActionArtistKey = null,

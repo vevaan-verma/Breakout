@@ -214,7 +214,7 @@ internal fun MatchupScreen(
     val selfName = account?.username.orEmpty()
     val loadedMembers = members.orEmpty()
     val scheduleMembers = loadedMembers.mapNotNull { it.username.takeIf { name -> name.isNotBlank() } }
-    val currentWeek = 1
+    val currentWeek = currentLeagueWeek(league)
     val currentMatchup = matchupForWeek(scheduleMembers, selfName, currentWeek)
     val opponentName = currentMatchup?.opponent ?: "Opponent"
     val opponentRoster = if (opponentName == "Opponent") {
@@ -278,7 +278,7 @@ internal fun MatchupScreen(
                     userArtist = roster[slot],
                     opponentArtist = opponentRoster[slot],
                     onOpenUserSlot = { targetSlot ->
-                        onOpenMarket(if (targetSlot.isBenchSlot()) MarketFilter.Headliners else targetSlot.filter)
+                        onOpenMarket(if (targetSlot.isBenchSlot()) MarketFilter.Trending else targetSlot.filter)
                     },
                     onArtistSelected = onArtistSelected
                 )
@@ -291,7 +291,7 @@ internal fun MatchupScreen(
                         userArtist = roster[slot],
                         opponentArtist = opponentRoster[slot],
                         onOpenUserSlot = { targetSlot ->
-                            onOpenMarket(if (targetSlot.isBenchSlot()) MarketFilter.Headliners else targetSlot.filter)
+                            onOpenMarket(if (targetSlot.isBenchSlot()) MarketFilter.Trending else targetSlot.filter)
                         },
                         onArtistSelected = onArtistSelected
                     )
@@ -550,7 +550,14 @@ internal fun MatchupScoreSide(
         horizontalAlignment = if (alignEnd) Alignment.End else Alignment.Start,
         verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.xs)
     ) {
-        Text(name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(
+            name,
+            style = MaterialTheme.typography.titleMedium,
+            color = if (name == "You") WaiverAccent else MaterialTheme.colorScheme.onSurface,
+            fontWeight = if (name == "You") FontWeight.Black else FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
         Text(current, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
         Text("Proj. $projected", color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium)
     }

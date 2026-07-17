@@ -1,4 +1,4 @@
-﻿package com.vevaan.breakout
+package com.vevaan.breakout
 
 import android.Manifest
 import android.app.AlarmManager
@@ -156,6 +156,7 @@ import com.vevaan.breakout.ui.theme.BreakoutPrimary
 import com.vevaan.breakout.ui.theme.BreakoutSecondary
 import com.vevaan.breakout.ui.theme.BreakoutSurface
 import com.vevaan.breakout.ui.theme.BreakoutSurfaceVariant
+import com.vevaan.breakout.ui.theme.BreakoutTextPrimary
 import com.vevaan.breakout.ui.theme.BreakoutTextSecondary
 import com.vevaan.breakout.ui.theme.BreakoutTheme
 import kotlinx.coroutines.Dispatchers
@@ -185,6 +186,8 @@ import java.util.Base64
 import kotlin.math.log10
 import kotlin.math.max
 import kotlin.random.Random
+
+private val WaiverOrderSectionMinHeight = 220.dp
 
 @Composable
 internal fun RosterScreen(
@@ -237,16 +240,15 @@ internal fun RosterScreen(
                 detail = "Rosters are filled during the live draft."
             )
         }
-        LazyColumn(
-            state = rosterListState,
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = 760.dp),
+                .animateContentSize(),
             verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.CardSpacing)
         ) {
-            items(slots, key = { slot -> slot.name }) { slot ->
+            slots.forEach { slot ->
                 RosterSlotCard(
-                    modifier = Modifier.animateItem(),
+                    modifier = Modifier.fillMaxWidth(),
                     slot = slot,
                     artist = roster[slot],
                     draftStatus = draftStatus,
@@ -264,17 +266,28 @@ internal fun RosterScreen(
         }
         if (draftStatus == DraftStatus.Complete) {
             BreakoutCard(contentPadding = PaddingValues(BreakoutDimensions.HeroCardPadding)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text("Waiver Queue", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                        Text("Order your claims before waivers process.", color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium)
+                    }
+                    Text("${waiverClaims.size}/${leagueSettings.maxWaiverClaims}", color = WaiverAccent, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.CardSpacing)) {
                     StatTile("Waiver Priority", "#1", "This week", Modifier.weight(1f))
                     StatTile("Open Slots", slots.count { roster[it] == null }.toString(), "Roster space", Modifier.weight(1f))
                 }
                 if (waiverClaims.isEmpty()) {
                     Text("Queue claims from artist pages when you have a matching open slot.", color = BreakoutTextSecondary)
-                    waiverResults.forEach { result ->
-                        WaiverResultRow(result)
-                    }
                 } else {
-                    val waiverListHeight = waiverClaims.size * 167
+                    val waiverRowHeight = 202
+                    val waiverListHeight = waiverClaims.size * waiverRowHeight +
+                        (waiverClaims.size - 1).coerceAtLeast(0) * 8 +
+                        30
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -284,13 +297,20 @@ internal fun RosterScreen(
                     ) {
                         items(waiverClaims, key = { claim -> "${claim.artist.stableListKey()}:${claim.slot.name}" }) { claim ->
                             val index = waiverClaims.indexOf(claim)
+                            val cleanDropName = claim.dropArtistName?.takeUnless { it.isBlank() || it.equals("null", ignoreCase = true) }
+                            val displayClaim = if (cleanDropName == claim.dropArtistName) claim else claim.copy(dropArtistName = cleanDropName)
+                            val dropArtist = cleanDropName?.let { dropName ->
+                                roster.values.firstOrNull { it.name.equals(dropName, ignoreCase = true) }
+                            }
                             WaiverClaimRow(
                                 modifier = Modifier.animateItem(),
                                 priority = index + 1,
-                                claim = claim,
+                                claim = displayClaim,
+                                dropArtist = dropArtist,
                                 canMoveUp = index > 0,
                                 canMoveDown = index < waiverClaims.lastIndex,
                                 onArtistSelected = { onArtistSelected(claim.artist) },
+                                onDropArtistSelected = { dropArtist?.let(onArtistSelected) },
                                 onMoveUp = { onMoveWaiver(claim, -1) },
                                 onMoveDown = { onMoveWaiver(claim, 1) },
                                 onCancel = { pendingCancelWaiver = claim }
@@ -299,10 +319,21 @@ internal fun RosterScreen(
                     }
                 }
             }
-            BreakoutCard {
+            BreakoutCard(modifier = Modifier.heightIn(min = WaiverOrderSectionMinHeight)) {
                 Text("Waiver Order", style = MaterialTheme.typography.titleLarge)
                 waiverOrderPreview(memberCount).forEachIndexed { index, team ->
                     WaiverOrderRow(rank = index + 1, team = team)
+                }
+            }
+            if (waiverResults.isNotEmpty()) {
+                BreakoutCard {
+                    Text("Waiver History", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                    Text("Latest processed claims from this league.", color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium)
+                    Column(verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)) {
+                        waiverResults.forEach { result ->
+                            WaiverResultRow(result)
+                        }
+                    }
                 }
             }
         }
@@ -490,9 +521,11 @@ internal fun WaiverClaimRow(
     modifier: Modifier = Modifier,
     priority: Int,
     claim: WaiverClaimUi,
+    dropArtist: ArtistUi?,
     canMoveUp: Boolean,
     canMoveDown: Boolean,
     onArtistSelected: () -> Unit,
+    onDropArtistSelected: () -> Unit,
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
     onCancel: () -> Unit
@@ -500,7 +533,7 @@ internal fun WaiverClaimRow(
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .animateContentSize(),
+            .height(202.dp),
         color = Color(0xFF19171A),
         shape = RoundedCornerShape(BreakoutDimensions.CardCornerRadius),
         border = BorderStroke(
@@ -510,8 +543,10 @@ internal fun WaiverClaimRow(
     ) {
         Column(
             // Waiver card inner margin and spacing between priority, artist text, reorder controls, and cancel.
-            modifier = Modifier.padding(BreakoutDimensions.md),
-            verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(BreakoutDimensions.md),
+            verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.xs)
         ) {
             Row(
                 horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.md),
@@ -559,7 +594,7 @@ internal fun WaiverClaimRow(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = claim.dropArtistName?.let { "Pending waiver • Drops $it" } ?: "Pending waiver",
+                        text = "Pending waiver",
                         color = WaiverAccent,
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold,
@@ -576,6 +611,17 @@ internal fun WaiverClaimRow(
                 )
             }
 
+            WaiverDropPanel(
+                value = claim.dropArtistName,
+                helper = if (claim.dropArtistName == null) {
+                    "Uses an open ${claim.slot.label.lowercase()} slot if processed"
+                } else {
+                    "Only drops this artist if processed"
+                },
+                onClick = if (dropArtist != null) onDropArtistSelected else null,
+                modifier = Modifier.fillMaxWidth()
+            )
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
@@ -591,6 +637,58 @@ internal fun WaiverClaimRow(
                     enabled = canMoveDown,
                     modifier = Modifier.weight(1f),
                     onClick = onMoveDown
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun WaiverDropPanel(
+    value: String?,
+    helper: String,
+    onClick: (() -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
+    val accent = if (value == null) WaiverAccent else BreakoutCoral
+    Surface(
+        modifier = modifier
+            .height(42.dp)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
+        color = accent.copy(alpha = 0.11f),
+        shape = RoundedCornerShape(BreakoutDimensions.SmallCornerRadius),
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.25f))
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = BreakoutDimensions.md),
+            horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                if (value == null) "No Drop" else "Drops",
+                // Waiver drop label width: reduce/increase this to tune space reserved for Drops/No Drop.
+                modifier = Modifier.width(40.dp),
+                color = accent,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Black,
+                textAlign = TextAlign.Center,
+                maxLines = 1
+            )
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
+                Text(
+                    value ?: "Roster stays unchanged",
+                    color = if (value == null) BreakoutTextSecondary else BreakoutTextPrimary,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    helper,
+                    color = BreakoutTextSecondary,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         }
@@ -649,9 +747,10 @@ internal fun WaiverOrderRow(rank: Int, team: String) {
 @Composable
 internal fun WaiverResultRow(result: WaiverResultUi) {
     val accent = when (result.status) {
-        "Processed" -> WaiverAccent
+        "Processed" -> Color(0xFF62D394)
         "Rejected" -> BreakoutCoral
-        else -> BreakoutTextSecondary
+        "Deleted" -> BreakoutTextSecondary
+        else -> BreakoutCoral
     }
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -664,7 +763,15 @@ internal fun WaiverResultRow(result: WaiverResultUi) {
             horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(result.status, color = accent, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Black)
+            Text(
+                result.status,
+                modifier = Modifier.width(76.dp),
+                color = accent,
+                textAlign = TextAlign.Center,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Black,
+                maxLines = 1
+            )
             Column(modifier = Modifier.weight(1f)) {
                 Text(result.artistName, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(result.detail, color = BreakoutTextSecondary, style = MaterialTheme.typography.bodySmall)

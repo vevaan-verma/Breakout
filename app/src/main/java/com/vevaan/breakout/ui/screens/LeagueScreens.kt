@@ -257,6 +257,7 @@ internal fun LeagueScreen(
     onMemberRosterOpened: () -> Unit,
     onArtistSelected: (ArtistUi) -> Unit,
     onMemberRosterArtistSelected: (LeagueMemberUi, ArtistUi) -> Unit,
+    onTradeWithMember: (LeagueMemberUi) -> Unit,
     onRunWaivers: () -> Unit,
     onLeaveLeague: () -> Unit,
     onDeleteLeague: () -> Unit
@@ -670,6 +671,10 @@ internal fun LeagueScreen(
                 onViewRoster = {
                     selectedMember = null
                     rosterMember = member
+                },
+                onTrade = {
+                    selectedMember = null
+                    onTradeWithMember(member)
                 },
                 onTransfer = {
                     selectedMember = null

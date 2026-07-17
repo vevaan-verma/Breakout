@@ -253,6 +253,22 @@ create table if not exists public.waiver_claims (
     unique (league_id, user_id, artist_id)
 );
 
+alter table public.waiver_claims add column if not exists drop_artist_id uuid references public.artists(id) on delete set null;
+alter table public.waiver_claims add column if not exists result_detail text;
+alter table public.waiver_claims add column if not exists processed_order integer;
+
+do $$
+begin
+    if not exists (
+        select 1 from pg_constraint
+        where conname = 'waiver_claims_status_check'
+    ) then
+        alter table public.waiver_claims
+        add constraint waiver_claims_status_check check (status in ('pending', 'processed', 'rejected', 'deleted', 'canceled'));
+    end if;
+end;
+$$;
+
 create table if not exists public.draft_picks (
     id uuid primary key default gen_random_uuid(),
     league_id uuid not null references public.leagues(id) on delete cascade,
@@ -1657,11 +1673,11 @@ begin
     where id = target_artist_id;
 
     if target_slot ilike 'Headliner%' then
-        return audience >= 50000000;
+        return audience >= 40000000;
     elsif target_slot ilike 'Wildcard%' then
-        return audience >= 12000000 and audience < 50000000;
+        return audience >= 15000000 and audience < 40000000;
     elsif target_slot ilike 'Rising%' then
-        return audience >= 1000000 and audience < 12000000;
+        return audience >= 1000000 and audience < 15000000;
     elsif target_slot ilike 'DeepCut%' then
         return audience < 1000000;
     end if;
@@ -1671,6 +1687,68 @@ end;
 $$;
 
 grant execute on function public.artist_fits_roster_slot(uuid, text) to authenticated;
+
+create or replace function public.ensure_artist_record(
+    requested_artist_name text,
+    requested_provider_name text default 'spotify',
+    requested_provider_url text default null,
+    requested_image_url text default null,
+    requested_listeners bigint default 0,
+    requested_playcount bigint default 0
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    normalized_artist_name text;
+    target_artist_id uuid;
+begin
+    if trim(coalesce(requested_artist_name, '')) = '' then
+        raise exception 'Choose an artist first';
+    end if;
+
+    normalized_artist_name := lower(regexp_replace(trim(requested_artist_name), '\s+', ' ', 'g'));
+
+    insert into public.artists (
+        display_name,
+        lastfm_name,
+        normalized_name,
+        provider_name,
+        provider_url,
+        image_url,
+        listeners,
+        playcount,
+        fetched_at
+    )
+    values (
+        trim(requested_artist_name),
+        trim(requested_artist_name),
+        normalized_artist_name,
+        coalesce(nullif(trim(coalesce(requested_provider_name, '')), ''), 'spotify'),
+        nullif(trim(coalesce(requested_provider_url, '')), ''),
+        nullif(trim(coalesce(requested_image_url, '')), ''),
+        greatest(coalesce(requested_listeners, 0), 0),
+        greatest(coalesce(requested_playcount, 0), 0),
+        now()
+    )
+    on conflict (normalized_name) do update
+    set display_name = coalesce(excluded.display_name, public.artists.display_name),
+        lastfm_name = coalesce(nullif(excluded.lastfm_name, ''), public.artists.lastfm_name),
+        provider_name = excluded.provider_name,
+        provider_url = coalesce(excluded.provider_url, public.artists.provider_url),
+        image_url = coalesce(excluded.image_url, public.artists.image_url),
+        listeners = greatest(coalesce(excluded.listeners, 0), coalesce(public.artists.listeners, 0)),
+        playcount = greatest(coalesce(excluded.playcount, 0), coalesce(public.artists.playcount, 0)),
+        fetched_at = now()
+    returning id into target_artist_id;
+
+    return target_artist_id;
+end;
+$$;
+
+grant execute on function public.ensure_artist_record(text, text, text, text, bigint, bigint) to authenticated;
 
 create or replace function public.trade_item_payload(target_roster public.rosters)
 returns jsonb
@@ -1717,6 +1795,552 @@ $$;
 
 grant execute on function public.trade_active_slots(uuid) to authenticated;
 
+create or replace function public.next_open_roster_slot(
+    target_league_id uuid,
+    target_user_id uuid,
+    target_artist_id uuid
+)
+returns text
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    candidate text;
+begin
+    foreach candidate in array public.trade_active_slots(target_league_id) loop
+        if public.artist_fits_roster_slot(target_artist_id, candidate)
+            and not exists (
+                select 1
+                from public.rosters
+                where league_id = target_league_id
+                and user_id = target_user_id
+                and roster_slot = candidate
+                and released_at is null
+            )
+        then
+            return candidate;
+        end if;
+    end loop;
+    return null;
+end;
+$$;
+
+grant execute on function public.next_open_roster_slot(uuid, uuid, uuid) to authenticated;
+
+create or replace function public.queue_waiver_claim(
+    target_league_id uuid,
+    requested_artist_name text,
+    requested_provider_name text,
+    requested_provider_url text,
+    requested_image_url text,
+    requested_listeners bigint,
+    requested_playcount bigint,
+    requested_roster_slot text,
+    drop_artist_name text default null
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    current_user_id uuid := auth.uid();
+    target_artist_id uuid;
+    drop_artist_id uuid;
+    next_priority integer;
+    max_claims integer;
+    active_claims integer;
+    claim_id uuid;
+begin
+    if current_user_id is null then
+        raise exception 'Authentication required';
+    end if;
+    if not exists (
+        select 1 from public.league_members
+        where league_id = target_league_id
+        and user_id = current_user_id
+        and status = 'active'
+    ) then
+        raise exception 'You are not a member of this league';
+    end if;
+
+    select max_waiver_claims into max_claims
+    from public.leagues
+    where id = target_league_id;
+
+    select count(*) into active_claims
+    from public.waiver_claims
+    where league_id = target_league_id
+    and user_id = current_user_id
+    and status = 'pending';
+
+    if active_claims >= coalesce(max_claims, 5) then
+        raise exception 'Your waiver queue is full';
+    end if;
+
+    target_artist_id := public.ensure_artist_record(
+        requested_artist_name,
+        requested_provider_name,
+        requested_provider_url,
+        requested_image_url,
+        requested_listeners,
+        requested_playcount
+    );
+
+    if exists (
+        select 1 from public.rosters
+        where league_id = target_league_id
+        and artist_id = target_artist_id
+        and released_at is null
+    ) then
+        raise exception 'That artist is already on a roster';
+    end if;
+
+    if trim(coalesce(drop_artist_name, '')) <> '' then
+        select artists.id into drop_artist_id
+        from public.rosters
+        join public.artists on artists.id = rosters.artist_id
+        where rosters.league_id = target_league_id
+        and rosters.user_id = current_user_id
+        and rosters.released_at is null
+        and lower(coalesce(artists.display_name, artists.normalized_name)) = lower(regexp_replace(trim(drop_artist_name), '\s+', ' ', 'g'))
+        limit 1;
+
+        if drop_artist_id is null then
+            raise exception 'The replacement artist is no longer on your roster';
+        end if;
+    elsif public.next_open_roster_slot(target_league_id, current_user_id, target_artist_id) is null then
+        raise exception 'Choose a roster artist to replace';
+    end if;
+
+    requested_roster_slot := coalesce(
+        public.next_open_roster_slot(target_league_id, current_user_id, target_artist_id),
+        requested_roster_slot
+    );
+
+    select coalesce(max(priority), 0) + 1 into next_priority
+    from public.waiver_claims
+    where league_id = target_league_id
+    and user_id = current_user_id
+    and status = 'pending';
+
+    insert into public.waiver_claims (
+        league_id,
+        user_id,
+        artist_id,
+        roster_slot,
+        drop_artist_id,
+        priority,
+        status
+    )
+    values (
+        target_league_id,
+        current_user_id,
+        target_artist_id,
+        requested_roster_slot,
+        drop_artist_id,
+        next_priority,
+        'pending'
+    )
+    on conflict (league_id, user_id, artist_id) do update
+    set roster_slot = excluded.roster_slot,
+        drop_artist_id = excluded.drop_artist_id,
+        status = 'pending',
+        processed_at = null,
+        result_detail = null,
+        priority = excluded.priority
+    returning id into claim_id;
+
+    return claim_id;
+end;
+$$;
+
+grant execute on function public.queue_waiver_claim(uuid, text, text, text, text, bigint, bigint, text, text) to authenticated;
+
+create or replace function public.cancel_waiver_claim(target_claim_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    target_league_id uuid;
+    current_user_id uuid := auth.uid();
+begin
+    update public.waiver_claims
+    set status = 'canceled',
+        processed_at = now(),
+        result_detail = 'Canceled by you.'
+    where id = target_claim_id
+    and user_id = current_user_id
+    and status = 'pending'
+    returning league_id into target_league_id;
+
+    if target_league_id is null then
+        raise exception 'That waiver claim is no longer available';
+    end if;
+
+    update public.waiver_claims
+    set priority = ordered.new_priority
+    from (
+        select id, row_number() over (order by priority, created_at) as new_priority
+        from public.waiver_claims
+        where league_id = target_league_id
+        and user_id = current_user_id
+        and status = 'pending'
+    ) ordered
+    where waiver_claims.id = ordered.id;
+end;
+$$;
+
+grant execute on function public.cancel_waiver_claim(uuid) to authenticated;
+
+create or replace function public.move_waiver_claim(target_claim_id uuid, direction integer)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    target_claim public.waiver_claims%rowtype;
+    swap_claim public.waiver_claims%rowtype;
+    current_user_id uuid := auth.uid();
+begin
+    select * into target_claim
+    from public.waiver_claims
+    where id = target_claim_id
+    and user_id = current_user_id
+    and status = 'pending';
+
+    if target_claim.id is null then
+        raise exception 'That waiver claim is no longer available';
+    end if;
+
+    if direction < 0 then
+        select * into swap_claim
+        from public.waiver_claims
+        where league_id = target_claim.league_id
+        and user_id = current_user_id
+        and status = 'pending'
+        and priority < target_claim.priority
+        order by priority desc
+        limit 1;
+    elsif direction > 0 then
+        select * into swap_claim
+        from public.waiver_claims
+        where league_id = target_claim.league_id
+        and user_id = current_user_id
+        and status = 'pending'
+        and priority > target_claim.priority
+        order by priority asc
+        limit 1;
+    else
+        return;
+    end if;
+
+    if swap_claim.id is null then
+        return;
+    end if;
+
+    update public.waiver_claims set priority = swap_claim.priority where id = target_claim.id;
+    update public.waiver_claims set priority = target_claim.priority where id = swap_claim.id;
+end;
+$$;
+
+grant execute on function public.move_waiver_claim(uuid, integer) to authenticated;
+
+drop function if exists public.league_waiver_claims(uuid);
+create or replace function public.league_waiver_claims(target_league_id uuid)
+returns table(
+    id uuid,
+    username text,
+    artist_name text,
+    image_url text,
+    listeners bigint,
+    playcount bigint,
+    roster_slot text,
+    drop_artist_name text,
+    priority integer,
+    status text,
+    result_detail text,
+    created_at timestamptz,
+    processed_at timestamptz,
+    is_mine boolean
+)
+language sql
+security definer
+set search_path = public
+as $$
+    select
+        waiver_claims.id,
+        profiles.username,
+        coalesce(artists.display_name, artists.normalized_name) as artist_name,
+        artists.image_url,
+        artists.listeners,
+        artists.playcount,
+        waiver_claims.roster_slot,
+        coalesce(drop_artists.display_name, drop_artists.normalized_name) as drop_artist_name,
+        waiver_claims.priority,
+        waiver_claims.status,
+        waiver_claims.result_detail,
+        waiver_claims.created_at,
+        waiver_claims.processed_at,
+        waiver_claims.user_id = auth.uid() as is_mine
+    from public.waiver_claims
+    join public.profiles on profiles.id = waiver_claims.user_id
+    join public.artists on artists.id = waiver_claims.artist_id
+    left join public.artists drop_artists on drop_artists.id = waiver_claims.drop_artist_id
+    where waiver_claims.league_id = target_league_id
+    and exists (
+        select 1 from public.league_members
+        where league_members.league_id = target_league_id
+        and league_members.user_id = auth.uid()
+        and league_members.status = 'active'
+    )
+    and (
+        waiver_claims.status <> 'pending'
+        or waiver_claims.user_id = auth.uid()
+    )
+    order by
+        case when waiver_claims.status = 'pending' and waiver_claims.user_id = auth.uid() then 0 else 1 end,
+        waiver_claims.priority,
+        waiver_claims.processed_at desc nulls last,
+        waiver_claims.created_at desc;
+$$;
+
+grant execute on function public.league_waiver_claims(uuid) to authenticated;
+
+drop function if exists public.league_roster_entries(uuid);
+create or replace function public.league_roster_entries(target_league_id uuid)
+returns table(
+    username text,
+    roster_slot text,
+    artist_name text,
+    image_url text,
+    listeners bigint,
+    playcount bigint,
+    acquired_at timestamptz,
+    released_at timestamptz
+)
+language sql
+security definer
+set search_path = public
+as $$
+    select
+        profiles.username,
+        rosters.roster_slot,
+        coalesce(artists.display_name, artists.normalized_name) as artist_name,
+        artists.image_url,
+        artists.listeners,
+        artists.playcount,
+        rosters.acquired_at,
+        rosters.released_at
+    from public.rosters
+    join public.profiles on profiles.id = rosters.user_id
+    join public.artists on artists.id = rosters.artist_id
+    where rosters.league_id = target_league_id
+    and rosters.released_at is null
+    and exists (
+        select 1 from public.league_members
+        where league_members.league_id = target_league_id
+        and league_members.user_id = auth.uid()
+        and league_members.status = 'active'
+    )
+    order by profiles.username, rosters.roster_slot, rosters.acquired_at;
+$$;
+
+grant execute on function public.league_roster_entries(uuid) to authenticated;
+
+create or replace function public.run_league_waivers(target_league_id uuid)
+returns integer
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    actor uuid := auth.uid();
+    league_record public.leagues%rowtype;
+    member_record record;
+    claim_record record;
+    target_slot text;
+    processed_count integer := 0;
+    pass_number integer := 1;
+    found_claim boolean;
+    process_order integer := 0;
+begin
+    if actor is null then
+        raise exception 'Authentication required';
+    end if;
+
+    select * into league_record from public.leagues where id = target_league_id;
+    if league_record.id is null then
+        raise exception 'League not found';
+    end if;
+
+    if not exists (
+        select 1 from public.league_members
+        where league_id = target_league_id
+        and user_id = actor
+        and status = 'active'
+        and role = 'manager'
+    ) then
+        raise exception 'Only the manager can run waivers';
+    end if;
+
+    loop
+        found_claim := false;
+        for member_record in
+            select league_members.user_id, profiles.username
+            from public.league_members
+            join public.profiles on profiles.id = league_members.user_id
+            where league_members.league_id = target_league_id
+            and league_members.status = 'active'
+            order by coalesce(league_members.draft_order_position, 999999), league_members.joined_at, league_members.user_id
+        loop
+            select
+                waiver_claims.*,
+                coalesce(artists.display_name, artists.normalized_name) as claim_artist_name,
+                coalesce(drop_artists.display_name, drop_artists.normalized_name) as drop_artist_name
+            into claim_record
+            from public.waiver_claims
+            join public.artists on artists.id = waiver_claims.artist_id
+            left join public.artists drop_artists on drop_artists.id = waiver_claims.drop_artist_id
+            where waiver_claims.league_id = target_league_id
+            and waiver_claims.user_id = member_record.user_id
+            and waiver_claims.status = 'pending'
+            and waiver_claims.priority = pass_number
+            order by waiver_claims.created_at
+            limit 1;
+
+            if claim_record.id is null then
+                continue;
+            end if;
+
+            found_claim := true;
+            process_order := process_order + 1;
+
+            if exists (
+                select 1 from public.rosters
+                where league_id = target_league_id
+                and artist_id = claim_record.artist_id
+                and released_at is null
+            ) then
+                update public.waiver_claims
+                set status = 'rejected',
+                    processed_at = now(),
+                    processed_order = process_order,
+                    result_detail = 'A higher-priority waiver processed first.'
+                where id = claim_record.id;
+                continue;
+            end if;
+
+            if claim_record.drop_artist_id is not null then
+                select roster_slot into target_slot
+                from public.rosters
+                where league_id = target_league_id
+                and user_id = member_record.user_id
+                and artist_id = claim_record.drop_artist_id
+                and released_at is null
+                limit 1;
+
+                if target_slot is null then
+                    update public.waiver_claims
+                    set status = 'deleted',
+                        processed_at = now(),
+                        processed_order = process_order,
+                        result_detail = coalesce(claim_record.drop_artist_name, 'The replacement artist') || ' was no longer on your roster.'
+                    where id = claim_record.id;
+                    continue;
+                end if;
+
+                target_slot := coalesce(
+                    public.next_open_roster_slot(target_league_id, member_record.user_id, claim_record.artist_id),
+                    target_slot
+                );
+            else
+                target_slot := public.next_open_roster_slot(target_league_id, member_record.user_id, claim_record.artist_id);
+                if target_slot is null then
+                    update public.waiver_claims
+                    set status = 'deleted',
+                        processed_at = now(),
+                        processed_order = process_order,
+                        result_detail = 'No valid roster slot was open when waivers ran.'
+                    where id = claim_record.id;
+                    continue;
+                end if;
+            end if;
+
+            if not public.artist_fits_roster_slot(claim_record.artist_id, target_slot) then
+                update public.waiver_claims
+                set status = 'deleted',
+                    processed_at = now(),
+                    processed_order = process_order,
+                    result_detail = 'The target roster slot no longer fit this artist.'
+                where id = claim_record.id;
+                continue;
+            end if;
+
+            if claim_record.drop_artist_id is not null then
+                update public.rosters
+                set released_at = now()
+                where league_id = target_league_id
+                and user_id = member_record.user_id
+                and artist_id = claim_record.drop_artist_id
+                and released_at is null;
+            end if;
+
+            insert into public.rosters (
+                league_id,
+                user_id,
+                artist_id,
+                roster_slot,
+                acquisition_value,
+                acquired_at
+            )
+            values (
+                target_league_id,
+                member_record.user_id,
+                claim_record.artist_id,
+                target_slot,
+                0,
+                now()
+            )
+            on conflict (league_id, user_id, artist_id) do update
+            set roster_slot = excluded.roster_slot,
+                released_at = null,
+                acquired_at = now();
+
+            update public.waiver_claims
+            set status = 'processed',
+                processed_at = now(),
+                processed_order = process_order,
+                roster_slot = target_slot,
+                result_detail = coalesce(claim_record.claim_artist_name, 'Artist') || ' was added to your roster.'
+            where id = claim_record.id;
+
+            insert into public.notifications (user_id, league_id, kind, title, body)
+            values (
+                member_record.user_id,
+                target_league_id,
+                'waiver_processed',
+                league_record.name || ': Waiver processed',
+                coalesce(claim_record.claim_artist_name, 'Artist') || ' was added to your roster.'
+            );
+
+            processed_count := processed_count + 1;
+        end loop;
+
+        exit when not found_claim;
+        pass_number := pass_number + 1;
+    end loop;
+
+    return processed_count;
+end;
+$$;
+
+grant execute on function public.run_league_waivers(uuid) to authenticated;
+
 drop function if exists public.create_trade_offer(uuid, text, text, text);
 drop function if exists public.create_trade_offer(uuid, text, jsonb, jsonb);
 create or replace function public.create_trade_offer(
@@ -1740,6 +2364,7 @@ declare
     offered_first public.rosters%rowtype;
     requested_first public.rosters%rowtype;
     item_name text;
+    trade_item jsonb;
     trade_id uuid;
 begin
     if proposer is null then
@@ -1772,6 +2397,17 @@ begin
 
     if jsonb_array_length(offered_artist_names) = 0 or jsonb_array_length(requested_artist_names) = 0 then
         raise exception 'Choose at least one artist from each roster';
+    end if;
+
+    if (
+        select count(*)
+        from public.trade_offers active_offer
+        where active_offer.league_id = target_league_id
+        and active_offer.proposer_id = proposer
+        and active_offer.status = 'pending'
+        and active_offer.expires_at > now()
+    ) >= 8 then
+        raise exception 'You already have 8 active outgoing trades';
     end if;
 
     for item_name in select jsonb_array_elements_text(offered_artist_names)
@@ -1814,6 +2450,36 @@ begin
             requested_first := requested_roster;
         end if;
         requested_payload := requested_payload || public.trade_item_payload(requested_roster);
+    end loop;
+
+    if exists (
+        select 1
+        from public.trade_offers existing_trade
+        where existing_trade.league_id = target_league_id
+        and existing_trade.proposer_id = proposer
+        and existing_trade.recipient_id = recipient
+        and existing_trade.status = 'pending'
+        and existing_trade.expires_at > now()
+        and existing_trade.offered_items = offered_payload
+        and existing_trade.requested_items = requested_payload
+    ) then
+        raise exception 'You already sent this exact trade';
+    end if;
+
+    for trade_item in select jsonb_array_elements(offered_payload)
+    loop
+        if exists (
+            select 1
+            from public.trade_offers active_offer,
+                 jsonb_array_elements(active_offer.offered_items) active_item
+            where active_offer.league_id = target_league_id
+            and active_offer.proposer_id = proposer
+            and active_offer.status = 'pending'
+            and active_offer.expires_at > now()
+            and active_item->>'artist_id' = trade_item->>'artist_id'
+        ) then
+            raise exception 'One of those artists is already included in an active outgoing trade';
+        end if;
     end loop;
 
     insert into public.trade_offers (
@@ -1953,7 +2619,6 @@ begin
             update public.trade_offers set status = 'expired', responded_at = now() where id = trade.id;
             raise exception 'One of these artists is no longer available for this trade';
         end if;
-        available_recipient_slots := array_remove(available_recipient_slots, offered_roster.roster_slot);
         available_proposer_slots := array_append(available_proposer_slots, offered_roster.roster_slot);
     end loop;
 
@@ -1972,7 +2637,6 @@ begin
             update public.trade_offers set status = 'expired', responded_at = now() where id = trade.id;
             raise exception 'One of these artists is no longer available for this trade';
         end if;
-        available_proposer_slots := array_remove(available_proposer_slots, requested_roster.roster_slot);
         available_recipient_slots := array_append(available_recipient_slots, requested_roster.roster_slot);
     end loop;
 
@@ -2052,10 +2716,29 @@ begin
 
     update public.trade_offers set status = 'accepted', responded_at = now() where id = trade.id;
 
+    update public.trade_offers other_trade
+    set status = 'expired',
+        responded_at = now()
+    where other_trade.league_id = trade.league_id
+    and other_trade.id <> trade.id
+    and other_trade.status = 'pending'
+    and exists (
+        select 1
+        from jsonb_array_elements(other_trade.offered_items || other_trade.requested_items) other_item,
+             jsonb_array_elements(trade.offered_items || trade.requested_items) moved_item
+        where other_item->>'artist_id' = moved_item->>'artist_id'
+    );
+
     insert into public.notifications (user_id, league_id, kind, title, body)
-    values
-        (trade.proposer_id, trade.league_id, 'trade_accepted', 'Trade accepted', 'Your trade offer was accepted.'),
-        (trade.recipient_id, trade.league_id, 'trade_accepted', 'Trade accepted', 'The trade has been added to your roster.');
+    select
+        league_members.user_id,
+        trade.league_id,
+        'trade_accepted',
+        'Trade accepted',
+        'A trade processed in your league.'
+    from public.league_members
+    where league_members.league_id = trade.league_id
+    and league_members.status = 'active';
 end;
 $$;
 

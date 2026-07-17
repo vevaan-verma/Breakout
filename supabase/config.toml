@@ -1,0 +1,2 @@
+[functions.refresh-market-cache]
+verify_jwt = false

@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -31,6 +32,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -49,6 +51,8 @@ import com.vevaan.breakout.ui.theme.BreakoutSurface
 import com.vevaan.breakout.ui.theme.BreakoutSurfaceVariant
 import com.vevaan.breakout.ui.theme.BreakoutTextSecondary
 
+private const val MaxActiveOutgoingTrades = 8
+
 @Composable
 internal fun TradeScreen(
     league: LeagueUi,
@@ -60,6 +64,8 @@ internal fun TradeScreen(
     refreshing: Boolean,
     onRefresh: () -> Unit,
     onOpenMenu: () -> Unit,
+    initialTradeUsername: String? = null,
+    onInitialTradeUsernameConsumed: () -> Unit = {},
     onSendTrade: (LeagueMemberUi, List<TradeArtistItemUi>, List<TradeArtistItemUi>) -> Unit,
     onAcceptTrade: (TradeOfferUi) -> Unit,
     onDeclineTrade: (TradeOfferUi) -> Unit,
@@ -72,6 +78,13 @@ internal fun TradeScreen(
     var selectedMemberName by rememberSaveable(league.id, tradeMembers.size) {
         mutableStateOf(tradeMembers.firstOrNull()?.username.orEmpty())
     }
+    LaunchedEffect(initialTradeUsername, tradeMembers) {
+        val target = initialTradeUsername ?: return@LaunchedEffect
+        tradeMembers.firstOrNull { it.username.equals(target, ignoreCase = true) }?.let {
+            selectedMemberName = it.username
+            onInitialTradeUsernameConsumed()
+        }
+    }
     val selectedMember = tradeMembers.firstOrNull { it.username == selectedMemberName } ?: tradeMembers.firstOrNull()
     var offeredSlotNames by rememberSaveable(league.id, roster.size) { mutableStateOf(setOf<String>()) }
     var requestedSlotNames by rememberSaveable(league.id, selectedMemberName) { mutableStateOf(setOf<String>()) }
@@ -82,11 +95,32 @@ internal fun TradeScreen(
     val requestedItems = memberRoster.entries
         .filter { it.key.name in requestedSlotNames }
         .map { TradeArtistItemUi(it.value, it.key) }
-    val validation = tradeValidation(offeredItems, requestedItems, roster, memberRoster)
+    val duplicatePendingOffer = selectedMember?.let { member ->
+        tradeOffers.any { offer ->
+            offer.status == "pending" &&
+                offer.outgoing &&
+                offer.recipientUsername.equals(member.username, ignoreCase = true) &&
+                offer.offeredItems.sameTradeArtists(offeredItems) &&
+                offer.requestedItems.sameTradeArtists(requestedItems)
+        }
+    } == true
+    val activeOutgoingTrades = tradeOffers.count { it.status == "pending" && it.outgoing }
+    val listState = rememberLazyListState()
+    var scrollToSentOffer by rememberSaveable(league.id) { mutableStateOf(false) }
+    val validation = tradeValidation(
+        offeredItems = offeredItems,
+        requestedItems = requestedItems,
+        myRoster = roster,
+        theirRoster = memberRoster,
+        settings = league.settings
+    )
+        ?: if (activeOutgoingTrades >= MaxActiveOutgoingTrades) "You already have $MaxActiveOutgoingTrades active outgoing trades. Cancel one before sending another." else null
+        ?: if (duplicatePendingOffer) "You already sent this exact trade. Change the artists or cancel the open offer first." else null
 
     ScreenColumn(
         refreshing = refreshing,
         onRefresh = onRefresh,
+        externalListState = listState,
         stickyTopBar = { TopTitle(title = "Trades", subtitle = league.name, onMenuClick = onOpenMenu) }
     ) {
         BreakoutCard(
@@ -101,7 +135,7 @@ internal fun TradeScreen(
             )
             Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.CardSpacing)) {
                 StatTile("Pending", tradeOffers.count { it.status == "pending" }.toString(), "Open offers", Modifier.weight(1f))
-                StatTile("Incoming", tradeOffers.count { it.status == "pending" && it.incoming }.toString(), "Need review", Modifier.weight(1f))
+                StatTile("Outgoing", "$activeOutgoingTrades/$MaxActiveOutgoingTrades", "Active sent", Modifier.weight(1f))
             }
         }
 
@@ -148,7 +182,10 @@ internal fun TradeScreen(
                     modifier = Modifier.fillMaxWidth(),
                     onClick = {
                         val member = selectedMember ?: return@PrimaryButton
+                        scrollToSentOffer = true
                         onSendTrade(member, offeredItems, requestedItems)
+                        offeredSlotNames = emptySet()
+                        requestedSlotNames = emptySet()
                     }
                 )
             }
@@ -162,6 +199,7 @@ internal fun TradeScreen(
                 tradeOffers.forEach { offer ->
                     TradeOfferCard(
                         offer = offer,
+                        selfName = selfName,
                         onAccept = { onAcceptTrade(offer) },
                         onDecline = { onDeclineTrade(offer) },
                         onCancel = { onCancelTrade(offer) },
@@ -169,6 +207,13 @@ internal fun TradeScreen(
                     )
                 }
             }
+        }
+    }
+
+    LaunchedEffect(activeOutgoingTrades, scrollToSentOffer) {
+        if (scrollToSentOffer && activeOutgoingTrades > 0) {
+            listState.animateScrollToItem(2)
+            scrollToSentOffer = false
         }
     }
 }
@@ -323,6 +368,7 @@ private fun SelectionDot(selected: Boolean) {
 @Composable
 private fun TradeOfferCard(
     offer: TradeOfferUi,
+    selfName: String,
     onAccept: () -> Unit,
     onDecline: () -> Unit,
     onCancel: () -> Unit,
@@ -350,11 +396,24 @@ private fun TradeOfferCard(
                 )
                 Text(offer.status.replaceFirstChar { it.uppercase() }, color = tradeAccent(offer), fontWeight = FontWeight.Bold)
             }
+            val proposerIsSelf = offer.proposerUsername.equals(selfName, ignoreCase = true)
+            val recipientIsSelf = offer.recipientUsername.equals(selfName, ignoreCase = true)
+            val leftName = when {
+                proposerIsSelf || recipientIsSelf -> "You"
+                else -> offer.proposerUsername
+            }
+            val rightName = when {
+                proposerIsSelf -> offer.recipientUsername
+                recipientIsSelf -> offer.proposerUsername
+                else -> offer.recipientUsername
+            }
+            val leftItems = if (recipientIsSelf) offer.requestedItems else offer.offeredItems
+            val rightItems = if (recipientIsSelf) offer.offeredItems else offer.requestedItems
             TradeSwapRow(
-                leftLabel = "${offer.proposerUsername} gives",
-                leftItems = offer.offeredItems,
-                rightLabel = "${offer.recipientUsername} gives",
-                rightItems = offer.requestedItems,
+                leftLabel = if (leftName == "You") "You give" else "$leftName gives",
+                leftItems = leftItems,
+                rightLabel = if (rightName == "You") "You give" else "$rightName gives",
+                rightItems = rightItems,
                 onArtistSelected = onArtistSelected
             )
             if (offer.status == "pending") {
@@ -403,7 +462,14 @@ private fun TradeMiniArtistStack(
             modifier = Modifier.padding(BreakoutDimensions.sm),
             verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.xs)
         ) {
-            Text(label, color = BreakoutTextSecondary, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                label,
+                color = if (label.startsWith("You")) WaiverAccent else BreakoutTextSecondary,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = if (label.startsWith("You")) FontWeight.Black else FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
             items.take(3).forEach { item ->
                 Row(
                     modifier = Modifier
@@ -432,19 +498,50 @@ private fun tradeValidation(
     offeredItems: List<TradeArtistItemUi>,
     requestedItems: List<TradeArtistItemUi>,
     myRoster: Map<RosterSlot, ArtistUi>,
-    theirRoster: Map<RosterSlot, ArtistUi>
+    theirRoster: Map<RosterSlot, ArtistUi>,
+    settings: LeagueSettingsUi
 ): String? {
     if (offeredItems.isEmpty()) return "Pick at least one artist from your roster."
-    if (requestedItems.isEmpty()) return "Pick at least one artist from the selected member's roster."
-    val myOpenSlots = myRoster.keys.toMutableSet().apply { addAll(offeredItems.map { it.slot }) }
-    val theirOpenSlots = theirRoster.keys.toMutableSet().apply { addAll(requestedItems.map { it.slot }) }
-    if (!requestedItems.all { item -> myOpenSlots.any { it.canHold(item.artist) } }) {
-        return "One requested artist does not fit your roster after the trade."
+    if (requestedItems.isEmpty()) return "Pick at least one artist from your trade partner's roster."
+    val myFailures = simulateTradeAdds(
+        baseRoster = myRoster.filterValues { rosterArtist ->
+            offeredItems.none { it.artist.name.equals(rosterArtist.name, ignoreCase = true) }
+        },
+        incoming = requestedItems.map { it.artist },
+        settings = settings
+    )
+    if (myFailures.isNotEmpty()) {
+        return "You do not have space in your roster for the following artists after the trade: ${myFailures.joinToString()}."
     }
-    if (!offeredItems.all { item -> theirOpenSlots.any { it.canHold(item.artist) } }) {
-        return "One offered artist does not fit the selected member's roster after the trade."
+    val theirFailures = simulateTradeAdds(
+        baseRoster = theirRoster.filterValues { rosterArtist ->
+            requestedItems.none { it.artist.name.equals(rosterArtist.name, ignoreCase = true) }
+        },
+        incoming = offeredItems.map { it.artist },
+        settings = settings
+    )
+    if (theirFailures.isNotEmpty()) {
+        return "Your trade partner does not have space in their roster for the following artists after the trade: ${theirFailures.joinToString()}."
     }
     return null
+}
+
+private fun simulateTradeAdds(
+    baseRoster: Map<RosterSlot, ArtistUi>,
+    incoming: List<ArtistUi>,
+    settings: LeagueSettingsUi
+): List<String> {
+    var simulated = baseRoster
+    val failures = mutableListOf<String>()
+    incoming.forEach { artist ->
+        val slot = firstOpenSlotFor(artist, simulated, settings)
+        if (slot == null) {
+            failures += artist.name
+        } else {
+            simulated = simulated + (slot to artist)
+        }
+    }
+    return failures
 }
 
 private fun tradeAccent(offer: TradeOfferUi) = when (offer.status) {
@@ -455,3 +552,6 @@ private fun tradeAccent(offer: TradeOfferUi) = when (offer.status) {
 
 private fun Set<String>.toggle(value: String): Set<String> =
     if (value in this) this - value else this + value
+
+private fun List<TradeArtistItemUi>.sameTradeArtists(other: List<TradeArtistItemUi>): Boolean =
+    map { it.artist.name.artistKey() }.sorted() == other.map { it.artist.name.artistKey() }.sorted()

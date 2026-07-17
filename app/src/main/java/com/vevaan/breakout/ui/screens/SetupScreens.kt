@@ -191,11 +191,12 @@ import kotlin.random.Random
 internal fun ScreenColumn(
     refreshing: Boolean = false,
     onRefresh: (() -> Unit)? = null,
+    externalListState: LazyListState? = null,
     stickyTopBar: (@Composable () -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
     val focusManager = LocalFocusManager.current
-    val listState = rememberLazyListState()
+    val listState = externalListState ?: rememberLazyListState()
     var pullDistance by remember { mutableStateOf(0f) }
     var refreshTriggered by remember { mutableStateOf(false) }
     val refreshThreshold = 148f
@@ -345,7 +346,7 @@ internal fun AppStartupLoadingScreen(
                     fontWeight = FontWeight.Black
                 )
                 Text(
-                    "Fantasy music, synced live.",
+                    "Build the roster. Catch the breakout.",
                     color = BreakoutTextSecondary,
                     style = MaterialTheme.typography.bodyLarge
                 )
