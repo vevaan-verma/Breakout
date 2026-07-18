@@ -189,11 +189,18 @@ import kotlin.random.Random
 @Composable
 internal fun AccountScreen(
     account: AccountUi?,
+    devModeAllowed: Boolean = false,
+    spotlightModeAllowed: Boolean = false,
+    devModeEnabled: Boolean = false,
+    spotlightModeEnabled: Boolean = false,
+    onDevModeChange: (Boolean) -> Unit = {},
+    onSpotlightModeChange: (Boolean) -> Unit = {},
     onOpenMenu: () -> Unit,
     onSaveAccount: (AccountUi, (String?) -> Unit) -> Unit,
     onDeleteAccount: ((String?) -> Unit) -> Unit,
     onSignOut: () -> Unit
 ) {
+    val context = LocalContext.current
     var email by rememberSaveable(account?.email.orEmpty()) { mutableStateOf(account?.email.orEmpty()) }
     var username by rememberSaveable(account?.username.orEmpty()) { mutableStateOf(account?.username.orEmpty()) }
     var mailingList by rememberSaveable(account?.mailingList ?: true) { mutableStateOf(account?.mailingList ?: true) }
@@ -203,6 +210,10 @@ internal fun AccountScreen(
     var deleting by rememberSaveable { mutableStateOf(false) }
     var confirmSignOut by rememberSaveable { mutableStateOf(false) }
     var confirmDelete by rememberSaveable { mutableStateOf(false) }
+    var emailUnlockTaps by rememberSaveable { mutableStateOf(0) }
+    var usernameUnlockTaps by rememberSaveable { mutableStateOf(0) }
+    var confirmDisableDevMode by rememberSaveable { mutableStateOf(false) }
+    var confirmDisableSpotlightMode by rememberSaveable { mutableStateOf(false) }
     val canSave = email.trim().contains("@") && isValidUsername(username.trim()) && !saving
 
     ScreenColumn(
@@ -218,7 +229,31 @@ internal fun AccountScreen(
                 Triple("Username", if (isValidUsername(username.trim())) "Valid" else "Check", "Display"),
                 Triple("Session", if (account?.accessToken?.isNotBlank() == true) "Active" else "Local", "Login")
             ),
-            accent = BreakoutSecondary
+            accent = BreakoutSecondary,
+            onStatTap = { label ->
+                when (label) {
+                    "Email" -> {
+                        if (devModeAllowed && !devModeEnabled) {
+                            emailUnlockTaps += 1
+                            if (emailUnlockTaps >= 10) {
+                                emailUnlockTaps = 0
+                                onDevModeChange(true)
+                                Toast.makeText(context, "Developer mode toggled on.", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                    "Username" -> {
+                        if (spotlightModeAllowed && !spotlightModeEnabled) {
+                            usernameUnlockTaps += 1
+                            if (usernameUnlockTaps >= 10) {
+                                usernameUnlockTaps = 0
+                                onSpotlightModeChange(true)
+                                Toast.makeText(context, "Spotlight mode toggled on.", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                }
+            }
         )
         BreakoutCard {
             Text("Profile", style = MaterialTheme.typography.titleLarge)
@@ -294,10 +329,67 @@ internal fun AccountScreen(
             ScoreLine("Your Email", email.trim().ifBlank { "Not set" })
             ScoreLine("Status", if (mailingList) "Subscribed" else "Unsubscribed")
         }
+        AnimatedVisibility(
+            visible = devModeEnabled || spotlightModeEnabled,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically()
+        ) {
+            BreakoutCard {
+                Text("Breakout Lab", style = MaterialTheme.typography.titleLarge)
+                AnimatedVisibility(
+                    visible = devModeEnabled,
+                    enter = fadeIn() + expandVertically(),
+                    exit = fadeOut() + shrinkVertically()
+                ) {
+                    ToggleRow(
+                        label = "Developer Mode",
+                        value = "On",
+                        enabled = devModeAllowed,
+                        onToggle = { confirmDisableDevMode = true }
+                    )
+                }
+                AnimatedVisibility(
+                    visible = spotlightModeEnabled,
+                    enter = fadeIn() + expandVertically(),
+                    exit = fadeOut() + shrinkVertically()
+                ) {
+                    ToggleRow(
+                        label = "Spotlight Mode",
+                        value = "On",
+                        enabled = spotlightModeAllowed,
+                        onToggle = { confirmDisableSpotlightMode = true }
+                    )
+                }
+            }
+        }
         BreakoutCard {
             Text("Account Actions", style = MaterialTheme.typography.titleLarge)
             DangerButton(text = "Log Out", onClick = { confirmSignOut = true })
             DangerButton(text = if (deleting) "Deleting Account" else "Delete Account", onClick = { confirmDelete = true })
+        }
+        if (confirmDisableDevMode) {
+            ConfirmActionCard(
+                title = "Turn Off Developer Mode?",
+                detail = "Testing utilities will disappear immediately.",
+                confirmText = "Turn Off",
+                onCancel = { confirmDisableDevMode = false },
+                onConfirm = {
+                    confirmDisableDevMode = false
+                    onDevModeChange(false)
+                }
+            )
+        }
+        if (confirmDisableSpotlightMode) {
+            ConfirmActionCard(
+                title = "Turn Off Spotlight Mode?",
+                detail = "Spotlight-only changes will turn off immediately.",
+                confirmText = "Turn Off",
+                onCancel = { confirmDisableSpotlightMode = false },
+                onConfirm = {
+                    confirmDisableSpotlightMode = false
+                    onSpotlightModeChange(false)
+                }
+            )
         }
         if (confirmSignOut) {
             ConfirmActionCard(
@@ -545,7 +637,7 @@ internal fun MemberRosterPickRow(pick: DraftPickUi, onClick: () -> Unit) {
     ) {
         ArtistArtwork(artist = pick.artist, size = BreakoutDimensions.ArtworkList)
         Column(modifier = Modifier.weight(1f)) {
-            Text(pick.artist.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(pick.artist.displayName(), style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text("Overall #${pick.pickNumber}", color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium)
         }
         TagLabel(pick.artist.tag)

@@ -482,7 +482,7 @@ private fun TradeMiniArtistStack(
                 ) {
                     ArtistArtwork(artist = item.artist, size = 34.dp)
                     Column(modifier = Modifier.weight(1f)) {
-                        Text(item.artist.name, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Black, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(item.artist.displayName(), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Black, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(item.slot.label, color = BreakoutTextSecondary, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }

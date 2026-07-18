@@ -188,7 +188,11 @@ import java.time.temporal.ChronoUnit
 import java.util.Base64
 import kotlin.math.log10
 import kotlin.math.max
+import kotlin.math.pow
 import kotlin.random.Random
+
+private const val BreakoutDevModesAllowed = true
+private const val BreakoutSpotlightModeAllowed = true
 
 class MainActivity : ComponentActivity() {
     private val authCallbackUri = mutableStateOf<Uri?>(null)
@@ -590,7 +594,11 @@ internal data class ArtistUi(
     val listenerChangeSinceSnapshotPercent: Double? = null,
     val daysSinceSnapshot: Int? = null,
     val topCityName: String? = null,
-    val topCityListenersLabel: String? = null
+    val topCityListenersLabel: String? = null,
+    val serverWeekStart: String? = null,
+    val serverScoreDate: String? = null,
+    val serverActualPoints: Double? = null,
+    val serverProjectedPoints: Double? = null
 ) {
     val initials: String = name
         .split(" ")
@@ -602,7 +610,13 @@ internal data class ArtistUi(
     val price: String
         get() {
             val listenersValue = listeners ?: return "Pending"
-            val millions = (5.0 + (log10(max(listenersValue.toDouble(), 10_000.0)) - 4.0) * 4.0).coerceIn(5.0, 32.0)
+            val listenerScale = ((log10(max(listenersValue.toDouble(), 100_000.0)) - 5.0) / 3.2).coerceIn(0.0, 1.0)
+            val scaleValue = listenerScale.pow(1.32) * 27.0
+            val growthPremium = weeklyListenerGrowthPercent
+                ?.let { ((it.coerceIn(-8.0, 80.0) + 8.0) / 88.0) * 5.0 }
+                ?: 0.0
+            val breakoutPremium = ((breakoutScore(null) - 50.0).coerceAtLeast(0.0) / 50.0) * 4.0
+            val millions = (4.0 + scaleValue + growthPremium + breakoutPremium).coerceIn(4.0, 38.0)
             return "\$${"%.1f".format(millions)}M"
         }
 
@@ -2338,8 +2352,9 @@ internal object SupabaseLeagueService {
                         .put("search_query", query.trim())
                         .toString()
                 ))
-                return@withContext List(rows.length()) { index -> rows.getJSONObject(index).toCachedMarketArtist() }
+                val artists = List(rows.length()) { index -> rows.getJSONObject(index).toCachedMarketArtist() }
                     .distinctBy { it.name.artistKey() }
+                return@withContext artists.withServerScores(loadCachedArtistScores(accessToken, query.trim()))
             }
             val allRows = mutableListOf<JSONObject>()
             val pageSize = 500
@@ -2367,8 +2382,38 @@ internal object SupabaseLeagueService {
             } while (rows.length() == pageSize && offset < maxRows)
             allRows.map { it.toCachedMarketArtist() }
                 .distinctBy { it.name.artistKey() }
+                .withServerScores(loadCachedArtistScores(accessToken, ""))
         }
     }
+
+    private suspend fun loadCachedArtistScores(accessToken: String, query: String): Map<String, JSONObject> = runCatching {
+        val rows = JSONArray(requestText(
+            url = "$baseUrl/rest/v1/rpc/artist_scores_cached",
+            method = "POST",
+            accessToken = accessToken,
+            body = JSONObject()
+                .put("search_query", query.trim())
+                .toString()
+        ))
+        buildMap {
+            repeat(rows.length()) { index ->
+                val row = rows.getJSONObject(index)
+                val key = row.optionalString("normalized_name")?.artistKey() ?: row.optionalString("name")?.artistKey()
+                if (key != null) put(key, row)
+            }
+        }
+    }.getOrDefault(emptyMap())
+
+    private fun List<ArtistUi>.withServerScores(scores: Map<String, JSONObject>): List<ArtistUi> =
+        map { artist ->
+            val score = scores[artist.name.artistKey()] ?: return@map artist
+            artist.copy(
+                serverWeekStart = score.optionalString("week_start"),
+                serverScoreDate = score.optionalString("score_date"),
+                serverActualPoints = if (score.isNull("actual_points")) null else score.optDouble("actual_points"),
+                serverProjectedPoints = if (score.isNull("projected_points")) null else score.optDouble("projected_points")
+            )
+        }
 
     suspend fun createLeague(accessToken: String, name: String, inviteCode: String, teamName: String): Result<LeagueUi> = runCatching {
         val leagueId = requestText(
@@ -3164,7 +3209,9 @@ internal object SupabaseLeagueService {
             name = optionalString("name") ?: optionalString("display_name") ?: "Unknown Artist",
             listeners = when {
                 !isNull("current_listeners") -> optLong("current_listeners")
-                !isNull("listeners") -> optLong("listeners")
+                !isNull("snapshot_listeners") -> optLong("snapshot_listeners")
+                optionalString("source")?.contains("Pastspot", ignoreCase = true) == true && !isNull("listeners") -> optLong("listeners")
+                optionalString("source")?.contains("Kworb", ignoreCase = true) == true && !isNull("listeners") -> optLong("listeners")
                 else -> null
             },
             albumCount = null,
@@ -3294,6 +3341,11 @@ internal object LocalBreakoutStore {
     private const val SnapshotsKey = "snapshots"
     private const val AccountKey = "account"
     private const val MarketArtistsKey = "market_artists"
+    private const val DevModeKey = "dev_mode_enabled"
+    private const val EncoreModeKey = "encore_mode_enabled"
+    private const val LocalMembersKey = "local_members"
+    private const val LocalDraftPicksKey = "local_draft_picks"
+    private const val LocalTradeOffersKey = "local_trade_offers"
 
     fun loadAccount(context: Context): AccountUi? {
         val raw = prefs(context).getString(AccountKey, null) ?: return null
@@ -3399,6 +3451,15 @@ internal object LocalBreakoutStore {
 
     private fun waiveredArtistDatesStorageKey(leagueKey: String?): String =
         leagueKey?.takeIf { it.isNotBlank() }?.let { "$WaiveredArtistDatesKey:$it" } ?: WaiveredArtistDatesKey
+
+    private fun localMembersStorageKey(leagueKey: String?): String =
+        leagueKey?.takeIf { it.isNotBlank() }?.let { "$LocalMembersKey:$it" } ?: LocalMembersKey
+
+    private fun localDraftPicksStorageKey(leagueKey: String?): String =
+        leagueKey?.takeIf { it.isNotBlank() }?.let { "$LocalDraftPicksKey:$it" } ?: LocalDraftPicksKey
+
+    private fun localTradeOffersStorageKey(leagueKey: String?): String =
+        leagueKey?.takeIf { it.isNotBlank() }?.let { "$LocalTradeOffersKey:$it" } ?: LocalTradeOffersKey
 
     fun loadRoster(context: Context, leagueKey: String? = null): Map<RosterSlot, ArtistUi> {
         val raw = prefs(context).getString(rosterStorageKey(leagueKey), "[]").orEmpty()
@@ -3521,6 +3582,141 @@ internal object LocalBreakoutStore {
         prefs(context).edit().putString(MarketArtistsKey, array.toString()).apply()
     }
 
+    fun loadDevModeEnabled(context: Context): Boolean = prefs(context).getBoolean(DevModeKey, false)
+
+    fun saveDevModeEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(DevModeKey, enabled).apply()
+    }
+
+    fun loadEncoreModeEnabled(context: Context): Boolean = prefs(context).getBoolean(EncoreModeKey, false)
+
+    fun saveEncoreModeEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(EncoreModeKey, enabled).apply()
+    }
+
+    fun loadLocalMembers(context: Context, leagueKey: String? = null): List<LeagueMemberUi> {
+        val raw = prefs(context).getString(localMembersStorageKey(leagueKey), "[]").orEmpty()
+        return runCatching {
+            val array = JSONArray(raw)
+            List(array.length()) { index -> array.getJSONObject(index) }.mapNotNull { item ->
+                val username = item.optString("username").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                LeagueMemberUi(
+                    username = username,
+                    teamName = item.optString("teamName", username),
+                    role = item.optString("role", "member"),
+                    autoPickEnabled = item.optBoolean("autoPickEnabled", true)
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun saveLocalMembers(context: Context, leagueKey: String? = null, members: List<LeagueMemberUi>) {
+        val array = JSONArray()
+        members.distinctBy { it.username.lowercase() }.forEach { member ->
+            array.put(JSONObject().apply {
+                put("username", member.username)
+                put("teamName", member.teamName)
+                put("role", member.role)
+                put("autoPickEnabled", member.autoPickEnabled)
+            })
+        }
+        prefs(context).edit().putString(localMembersStorageKey(leagueKey), array.toString()).apply()
+    }
+
+    fun loadLocalDraftPicks(context: Context, leagueKey: String? = null): List<DraftPickUi> {
+        val raw = prefs(context).getString(localDraftPicksStorageKey(leagueKey), "[]").orEmpty()
+        return runCatching {
+            val array = JSONArray(raw)
+            List(array.length()) { index -> array.getJSONObject(index) }.mapNotNull { item ->
+                val slot = RosterSlot.entries.firstOrNull { it.name == item.optString("slot") } ?: return@mapNotNull null
+                val artistObject = item.optJSONObject("artist") ?: return@mapNotNull null
+                DraftPickUi(
+                    pickNumber = item.optInt("pickNumber", 0),
+                    pickedBy = item.optString("pickedBy"),
+                    slot = slot,
+                    artist = artistObject.toStoredArtist(),
+                    secondsToPick = if (item.isNull("secondsToPick")) null else item.optInt("secondsToPick"),
+                    autoPicked = item.optBoolean("autoPicked", true)
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun saveLocalDraftPicks(context: Context, leagueKey: String? = null, picks: List<DraftPickUi>) {
+        val array = JSONArray()
+        picks.forEach { pick ->
+            array.put(JSONObject().apply {
+                put("pickNumber", pick.pickNumber)
+                put("pickedBy", pick.pickedBy)
+                put("slot", pick.slot.name)
+                put("secondsToPick", pick.secondsToPick)
+                put("autoPicked", pick.autoPicked)
+                put("artist", JSONObject().apply { putStoredArtist(pick.artist) })
+            })
+        }
+        prefs(context).edit().putString(localDraftPicksStorageKey(leagueKey), array.toString()).apply()
+    }
+
+    fun loadLocalTradeOffers(context: Context, leagueKey: String? = null): List<TradeOfferUi> {
+        val raw = prefs(context).getString(localTradeOffersStorageKey(leagueKey), "[]").orEmpty()
+        return runCatching {
+            val array = JSONArray(raw)
+            List(array.length()) { index -> array.getJSONObject(index) }.mapNotNull { item ->
+                TradeOfferUi(
+                    id = item.optString("id").takeIf { it.isNotBlank() } ?: return@mapNotNull null,
+                    proposerUsername = item.optString("proposerUsername"),
+                    recipientUsername = item.optString("recipientUsername"),
+                    offeredItems = item.optJSONArray("offeredItems").toTradeItems(),
+                    requestedItems = item.optJSONArray("requestedItems").toTradeItems(),
+                    status = item.optString("status", "accepted"),
+                    createdAt = item.optString("createdAt"),
+                    expiresAt = item.optString("expiresAt"),
+                    incoming = item.optBoolean("incoming"),
+                    outgoing = item.optBoolean("outgoing")
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun saveLocalTradeOffers(context: Context, leagueKey: String? = null, offers: List<TradeOfferUi>) {
+        val array = JSONArray()
+        offers.distinctBy { it.id }.forEach { offer ->
+            array.put(JSONObject().apply {
+                put("id", offer.id)
+                put("proposerUsername", offer.proposerUsername)
+                put("recipientUsername", offer.recipientUsername)
+                put("offeredItems", offer.offeredItems.toJson())
+                put("requestedItems", offer.requestedItems.toJson())
+                put("status", offer.status)
+                put("createdAt", offer.createdAt)
+                put("expiresAt", offer.expiresAt)
+                put("incoming", offer.incoming)
+                put("outgoing", offer.outgoing)
+            })
+        }
+        prefs(context).edit().putString(localTradeOffersStorageKey(leagueKey), array.toString()).apply()
+    }
+
+    private fun JSONArray?.toTradeItems(): List<TradeArtistItemUi> {
+        val array = this ?: return emptyList()
+        return List(array.length()) { index -> array.getJSONObject(index) }.mapNotNull { item ->
+            val slot = RosterSlot.entries.firstOrNull { it.name == item.optString("slot") } ?: return@mapNotNull null
+            val artist = item.optJSONObject("artist")?.toStoredArtist() ?: return@mapNotNull null
+            TradeArtistItemUi(artist = artist, slot = slot)
+        }
+    }
+
+    private fun List<TradeArtistItemUi>.toJson(): JSONArray {
+        val array = JSONArray()
+        forEach { tradeItem ->
+            array.put(JSONObject().apply {
+                put("slot", tradeItem.slot.name)
+                put("artist", JSONObject().apply { putStoredArtist(tradeItem.artist) })
+            })
+        }
+        return array
+    }
+
     fun clearLeagueState(context: Context, leagueKey: String) {
         prefs(context).edit()
             .remove(rosterStorageKey(leagueKey))
@@ -3528,6 +3724,9 @@ internal object LocalBreakoutStore {
             .remove(droppedArtistsStorageKey(leagueKey))
             .remove(droppedArtistDatesStorageKey(leagueKey))
             .remove(waiveredArtistDatesStorageKey(leagueKey))
+            .remove(localMembersStorageKey(leagueKey))
+            .remove(localDraftPicksStorageKey(leagueKey))
+            .remove(localTradeOffersStorageKey(leagueKey))
             .apply()
     }
 
@@ -3626,7 +3825,11 @@ internal object LocalBreakoutStore {
         listenerChangeSinceSnapshotPercent = if (isNull("listenerChangeSinceSnapshotPercent")) null else optDouble("listenerChangeSinceSnapshotPercent"),
         daysSinceSnapshot = if (isNull("daysSinceSnapshot")) null else optInt("daysSinceSnapshot"),
         topCityName = optString("topCityName").ifBlank { null },
-        topCityListenersLabel = optString("topCityListenersLabel").ifBlank { null }
+        topCityListenersLabel = optString("topCityListenersLabel").ifBlank { null },
+        serverWeekStart = optString("serverWeekStart").ifBlank { null },
+        serverScoreDate = optString("serverScoreDate").ifBlank { null },
+        serverActualPoints = if (isNull("serverActualPoints")) null else optDouble("serverActualPoints"),
+        serverProjectedPoints = if (isNull("serverProjectedPoints")) null else optDouble("serverProjectedPoints")
     )
 
     private fun JSONObject.putStoredArtist(artist: ArtistUi) {
@@ -3680,6 +3883,10 @@ internal object LocalBreakoutStore {
         put("daysSinceSnapshot", artist.daysSinceSnapshot)
         put("topCityName", artist.topCityName)
         put("topCityListenersLabel", artist.topCityListenersLabel)
+        put("serverWeekStart", artist.serverWeekStart)
+        put("serverScoreDate", artist.serverScoreDate)
+        put("serverActualPoints", artist.serverActualPoints)
+        put("serverProjectedPoints", artist.serverProjectedPoints)
     }
 
     private fun JSONObject.toLeagueSettings(): LeagueSettingsUi = LeagueSettingsUi(
@@ -3731,13 +3938,13 @@ internal fun BreakoutApp(
     var marketActiveFilter by rememberSaveable { mutableStateOf<MarketFilter?>(MarketFilter.Trending) }
     var marketPreviousFilter by rememberSaveable { mutableStateOf(MarketFilter.Trending) }
     var marketState by remember { mutableStateOf<MarketState>(MarketState.Loading) }
+    var marketSearchCache by remember { mutableStateOf<Map<String, List<ArtistUi>>>(emptyMap()) }
     var marketSnapshots by remember { mutableStateOf<Map<String, SnapshotUi>>(emptyMap()) }
     var openMarketActionArtistKey by rememberSaveable { mutableStateOf<String?>(null) }
     var marketVisibleCount by rememberSaveable { mutableStateOf(20) }
     var marketLastKey by rememberSaveable { mutableStateOf<String?>(null) }
     var marketLoadedKey by rememberSaveable { mutableStateOf<String?>(null) }
     var marketResetTick by rememberSaveable { mutableStateOf(0) }
-    var marketScrollPositions by rememberSaveable { mutableStateOf<Map<String, String>>(emptyMap()) }
     var selectedArtist by remember { mutableStateOf<ArtistUi?>(null) }
     var detailArtistForAnimation by remember { mutableStateOf<ArtistUi?>(null) }
     var selectedArtistReadOnly by remember { mutableStateOf(false) }
@@ -3775,6 +3982,15 @@ internal fun BreakoutApp(
     var initialTradeMemberUsername by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedAllMatchupsWeek by rememberSaveable { mutableStateOf(1) }
     var forcedAutoPickLeagueIds by rememberSaveable { mutableStateOf(setOf<String>()) }
+    var devModeRequested by rememberSaveable { mutableStateOf(LocalBreakoutStore.loadDevModeEnabled(context)) }
+    var spotlightModeRequested by rememberSaveable { mutableStateOf(LocalBreakoutStore.loadEncoreModeEnabled(context)) }
+    var simulatedWeekOffsetByLeagueId by rememberSaveable { mutableStateOf<Map<String, Int>>(emptyMap()) }
+    var forceRosterUnlockedByLeagueId by rememberSaveable { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
+    var forceRosterLockedByLeagueId by rememberSaveable { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
+    var simulationLoading by remember { mutableStateOf(false) }
+    var botLoading by remember { mutableStateOf(false) }
+    val devModeEnabled = BreakoutDevModesAllowed && devModeRequested
+    val encoreModeEnabled = BreakoutSpotlightModeAllowed && spotlightModeRequested
     val marketListState = rememberLazyListState()
     val league = leagues.firstOrNull { it.inviteCode == activeLeagueCode } ?: leagues.firstOrNull()
     val requiresOnlineAccount = isOnlinePlayConfigured()
@@ -3836,16 +4052,20 @@ internal fun BreakoutApp(
         return current
     }
 
+    fun LeagueUi.withDraftInviteLock(): LeagueUi =
+        if (draftStatus == DraftStatus.Scheduled || !invitesOpen) this else copy(invitesOpen = false)
+
     fun applyRemoteLeagues(remoteLeagues: List<LeagueUi>, notifyDeleted: Boolean = true) {
+        val normalizedLeagues = remoteLeagues.map { it.withDraftInviteLock() }
         val previousActive = league
         val activeWasRemoved = previousActive != null &&
-            remoteLeagues.none { remote ->
+            normalizedLeagues.none { remote ->
                 (previousActive.id.isNotBlank() && remote.id == previousActive.id) ||
                     remote.inviteCode == previousActive.inviteCode
             }
-        leagues = remoteLeagues
-        activeLeagueCode = remoteLeagues.firstOrNull { it.inviteCode == activeLeagueCode }?.inviteCode
-            ?: remoteLeagues.firstOrNull()?.inviteCode
+        leagues = normalizedLeagues
+        activeLeagueCode = normalizedLeagues.firstOrNull { it.inviteCode == activeLeagueCode }?.inviteCode
+            ?: normalizedLeagues.firstOrNull()?.inviteCode
         if (activeWasRemoved) {
             if (notifyDeleted) {
                 Toast.makeText(context, "This league was deleted.", Toast.LENGTH_LONG).show()
@@ -3875,6 +4095,30 @@ internal fun BreakoutApp(
         draftPicksByLeagueId[leagueId].orEmpty()
             .filter { it.pickedBy.equals(pickerUsername, ignoreCase = true) }
             .associate { it.slot to it.artist }
+
+    fun membersWithLocalBots(leagueId: String, loadedMembers: List<LeagueMemberUi>): List<LeagueMemberUi> {
+        val localMembers = leagueMembersById[leagueId].orEmpty() +
+            LocalBreakoutStore.loadLocalMembers(context, leagueId)
+        return (localMembers + loadedMembers).distinctBy { it.username.lowercase() }
+    }
+
+    fun draftPicksWithLocalBots(leagueId: String, loadedPicks: List<DraftPickUi>): List<DraftPickUi> {
+        val botNames = membersWithLocalBots(leagueId, emptyList())
+            .filter { it.username.isReservedBotUsername() }
+            .map { it.username.lowercase() }
+            .toSet()
+        val localBotPicks = LocalBreakoutStore.loadLocalDraftPicks(context, leagueId)
+            .filter { it.pickedBy.lowercase() in botNames }
+        return (loadedPicks.filterNot { it.pickedBy.lowercase() in botNames } + localBotPicks)
+            .sortedBy { it.pickNumber }
+    }
+
+    fun tradeOffersWithLocalBots(leagueId: String, loadedOffers: List<TradeOfferUi>): List<TradeOfferUi> {
+        val localOffers = LocalBreakoutStore.loadLocalTradeOffers(context, leagueId)
+        return (localOffers + loadedOffers)
+            .distinctBy { it.id }
+            .sortedByDescending { it.createdAt }
+    }
 
     fun rosterForAccount(activeLeague: LeagueUi): Map<RosterSlot, ArtistUi> {
         val username = account?.username.orEmpty()
@@ -3918,7 +4162,7 @@ internal fun BreakoutApp(
                     applyRemoteLeagues(remoteLeagues)
                 }
                 SupabaseLeagueService.loadDraftPicks(current.accessToken, activeLeague.id).onSuccess { picks ->
-                    draftPicksByLeagueId = draftPicksByLeagueId + (activeLeague.id to picks)
+                    draftPicksByLeagueId = draftPicksByLeagueId + (activeLeague.id to draftPicksWithLocalBots(activeLeague.id, picks))
                 }
                 draftPickMode = false
                 selectedArtist = null
@@ -3934,7 +4178,7 @@ internal fun BreakoutApp(
                     applyRemoteLeagues(remoteLeagues)
                 }
                 SupabaseLeagueService.loadDraftPicks(current.accessToken, activeLeague.id).onSuccess { picks ->
-                    draftPicksByLeagueId = draftPicksByLeagueId + (activeLeague.id to picks)
+                    draftPicksByLeagueId = draftPicksByLeagueId + (activeLeague.id to draftPicksWithLocalBots(activeLeague.id, picks))
                 }
             }
         }
@@ -3968,7 +4212,7 @@ internal fun BreakoutApp(
                     applyRemoteLeagues(remoteLeagues)
                 }
                 SupabaseLeagueService.loadDraftPicks(current.accessToken, activeLeague.id).onSuccess { picks ->
-                    draftPicksByLeagueId = draftPicksByLeagueId + (activeLeague.id to picks)
+                    draftPicksByLeagueId = draftPicksByLeagueId + (activeLeague.id to draftPicksWithLocalBots(activeLeague.id, picks))
                 }
             }.onFailure { error ->
                 if (!error.message.orEmpty().contains("already moved", ignoreCase = true)) {
@@ -4009,7 +4253,7 @@ internal fun BreakoutApp(
                         applyRemoteLeagues(remoteLeagues)
                     }
                     SupabaseLeagueService.loadDraftPicks(current.accessToken, target.id).onSuccess { picks ->
-                        draftPicksByLeagueId = draftPicksByLeagueId + (target.id to picks)
+                        draftPicksByLeagueId = draftPicksByLeagueId + (target.id to draftPicksWithLocalBots(target.id, picks))
                     }
                 }
                 .onFailure {
@@ -4190,11 +4434,12 @@ internal fun BreakoutApp(
         val updated = if (current.draftStatus != DraftStatus.Scheduled) {
             requested.copy(
                 maxMembers = current.maxMembers,
-                settings = current.settings
+                settings = current.settings,
+                invitesOpen = false
             )
         } else {
             requested
-        }
+        }.withDraftInviteLock()
         leagues = leagues.map { if (it.inviteCode == current.inviteCode) updated else it }
         scope.launch {
             currentOnlineAccount()?.accessToken?.takeIf { it.isNotBlank() }?.let { token ->
@@ -4232,7 +4477,7 @@ internal fun BreakoutApp(
                 SupabaseLeagueService.setMyAutoPick(current.accessToken, target.id, enabled)
                     .onFailure { Toast.makeText(context, friendlyLeagueError(it.message), Toast.LENGTH_LONG).show() }
                 SupabaseLeagueService.loadMembers(current.accessToken, target.id).onSuccess { loadedMembers ->
-                    leagueMembersById = leagueMembersById + (target.id to loadedMembers)
+                    leagueMembersById = leagueMembersById + (target.id to membersWithLocalBots(target.id, loadedMembers))
                 }
             } else {
                 updateActiveLeague { it.copy(autoPickEnabled = enabled) }
@@ -4279,17 +4524,6 @@ internal fun BreakoutApp(
     fun isDraftRoomTab(tab: BreakoutTab): Boolean =
         tab == BreakoutTab.Draft || tab == BreakoutTab.Market || tab == BreakoutTab.Roster
 
-    fun saveCurrentMarketScrollPosition() {
-        val key = if (marketSubmittedSearch.isNotBlank()) {
-            "search:${marketSubmittedSearch.trim().lowercase()}"
-        } else {
-            "filter:${(marketActiveFilter ?: marketStartFilter).name}"
-        }
-        marketScrollPositions = marketScrollPositions + (
-            key to "${marketListState.firstVisibleItemIndex}:${marketListState.firstVisibleItemScrollOffset}"
-        )
-    }
-
     fun navigateFromDraftAware(tab: BreakoutTab) {
         val active = league
         val currentDraftRoomOpen = isDraftRoomOpenForCurrentLeague()
@@ -4311,16 +4545,12 @@ internal fun BreakoutApp(
             if (pressingSelectedTrending) {
                 marketVisibleCount = 20
                 marketLastKey = null
-                marketScrollPositions = marketScrollPositions + ("filter:${MarketFilter.Trending.name}" to "0:0")
                 marketResetTick++
             }
             selectedArtist = null
             draftPickMode = currentDraftRoomOpen
             joinError = null
             return
-        }
-        if (selectedTab == BreakoutTab.Market && tab != BreakoutTab.Market) {
-            saveCurrentMarketScrollPosition()
         }
         if (selectedTab != tab) previousTab = selectedTab
         selectedTab = tab
@@ -4359,14 +4589,55 @@ internal fun BreakoutApp(
         }
     }
 
+    LaunchedEffect(marketSubmittedSearch, preloadedMarketArtists, account?.accessToken) {
+        val requestKey = marketSubmittedSearch.trim().lowercase()
+        if (requestKey.isBlank() || marketSearchCache[requestKey]?.isNotEmpty() == true) return@LaunchedEffect
+        val queryText = marketSubmittedSearch.trim()
+        val firstSearchPageSize = 20
+        val warmedArtists = preloadedMarketArtists.orEmpty()
+        val localResults = withContext(Dispatchers.Default) {
+            warmedArtists
+                .filter { it.name.searchMatchScore(queryText) > 0.0 }
+                .sortedWith(
+                    compareByDescending<ArtistUi> { it.name.searchMatchScore(queryText) }
+                        .thenByDescending { it.listeners ?: 0L }
+                        .thenByDescending { it.breakoutScore(marketSnapshots[it.name.lowercase()]) }
+                )
+                .marketDistinct()
+        }
+        val remoteResults = if (localResults.firstOrNull()?.name?.searchMatchScore(queryText) == 1_000.0) {
+            emptyList()
+        } else {
+            SupabaseLeagueService.loadCachedMarketArtists(
+                accessToken = account?.accessToken.orEmpty(),
+                query = queryText
+            ).getOrDefault(emptyList())
+        }
+        val results = withContext(Dispatchers.Default) {
+            (localResults + remoteResults)
+                .marketDistinct()
+                .sortedWith(
+                    compareByDescending<ArtistUi> { it.name.searchMatchScore(queryText) }
+                        .thenByDescending { it.listeners ?: 0L }
+                        .thenByDescending { it.breakoutScore(marketSnapshots[it.name.lowercase()]) }
+                )
+                .take(firstSearchPageSize)
+        }
+        if (results.isNotEmpty() && marketSubmittedSearch.trim().lowercase() == requestKey) {
+            prefetchArtistImages(context, results, limit = results.size)
+            marketSearchCache = marketSearchCache + (requestKey to results)
+        }
+    }
+
     fun processLocalWaivers(activeLeague: LeagueUi, sourceRoster: Map<RosterSlot, ArtistUi>, showToast: Boolean = false) {
         var updatedRoster = sourceRoster
         var awardedWaivers = emptySet<String>()
         val results = mutableListOf<WaiverResultUi>()
         waiverClaims.forEach { claim ->
+            val claimDisplayName = displayArtistNameForMode(claim.artist.name, encoreModeEnabled)
             val alreadyRostered = updatedRoster.values.any { it.name.equals(claim.artist.name, ignoreCase = true) }
             if (alreadyRostered) {
-                results += WaiverResultUi(claim.artist.name, "Rejected", "${claim.artist.name} was already on a roster when waivers ran.")
+                results += WaiverResultUi(claim.artist.name, "Rejected", "$claimDisplayName was already on a roster when waivers ran.")
                 return@forEach
             }
             val dropName = claim.dropArtistName ?: claim.dropSlot?.let { updatedRoster[it]?.name }
@@ -4383,7 +4654,7 @@ internal fun BreakoutApp(
             if (slot != null) {
                 updatedRoster = rosterAfterDrop + (slot to claim.artist)
                 awardedWaivers = awardedWaivers + claim.artist.name.lowercase()
-                results += WaiverResultUi(claim.artist.name, "Processed", "${claim.artist.name} was added to your roster.")
+                results += WaiverResultUi(claim.artist.name, "Processed", "$claimDisplayName was added to your roster.")
             } else {
                 results += WaiverResultUi(claim.artist.name, "Deleted", "No valid roster slot was available when waivers ran.")
             }
@@ -4437,7 +4708,7 @@ internal fun BreakoutApp(
                 Toast.makeText(context, "Your waiver queue is full.", Toast.LENGTH_SHORT).show()
             } else {
                 waiverClaims = waiverClaims + WaiverClaimUi(artist, slot, dropSlot, dropArtistName)
-                Toast.makeText(context, "${artist.name} added to waivers.", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "${displayArtistNameForMode(artist.name, encoreModeEnabled)} added to waivers.", Toast.LENGTH_SHORT).show()
             }
             return
         }
@@ -4449,24 +4720,213 @@ internal fun BreakoutApp(
             }
             SupabaseLeagueService.queueWaiver(current.accessToken, current.userId, activeLeague.id, artist, slot, dropArtistName)
                 .onSuccess {
-                    Toast.makeText(context, "${artist.name} added to waivers.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "${displayArtistNameForMode(artist.name, encoreModeEnabled)} added to waivers.", Toast.LENGTH_SHORT).show()
                     syncWaiversForLeague(activeLeague, force = true)
                 }
                 .onFailure { error -> Toast.makeText(context, cleanVisibleError(error.message), Toast.LENGTH_LONG).show() }
         }
     }
 
+    fun addBotMembersToLeague(activeLeague: LeagueUi, count: Int) {
+        if (!devModeEnabled || activeLeague.draftStatus == DraftStatus.Live) return
+        scope.launch {
+            botLoading = true
+            delay(450)
+            val currentMembers = leagueMembersById[activeLeague.id].orEmpty()
+            val availableSlots = (activeLeague.maxMembers - currentMembers.size).coerceAtLeast(0)
+            val addCount = count.coerceIn(0, availableSlots)
+            if (addCount <= 0) {
+                botLoading = false
+                return@launch
+            }
+            val existingNames = currentMembers.map { it.username.lowercase() }.toMutableSet()
+            val botMembers = mutableListOf<LeagueMemberUi>()
+            repeat(addCount) {
+                val botNumber = generateSequence(1) { it + 1 }
+                    .first { "bot$it" !in existingNames }
+                val botName = "Bot$botNumber"
+                existingNames += botName.lowercase()
+                botMembers += LeagueMemberUi(
+                    username = botName,
+                    teamName = botName,
+                    role = "member",
+                    autoPickEnabled = true
+                )
+            }
+            val updatedMembersWithBots = (currentMembers + botMembers).distinctBy { it.username.lowercase() }
+            val oldMemberCount = currentMembers.size.coerceAtLeast(1)
+            val newMemberCount = updatedMembersWithBots.size.coerceAtLeast(oldMemberCount)
+            leagueMembersById = leagueMembersById + (activeLeague.id to updatedMembersWithBots)
+            LocalBreakoutStore.saveLocalMembers(
+                context,
+                activeLeague.id.ifBlank { activeLeague.inviteCode },
+                updatedMembersWithBots.filter { it.username.isReservedBotUsername() || it.username.equals(account?.username.orEmpty(), ignoreCase = true) }
+            )
+            updateActiveLeague {
+                it.copy(memberCount = (currentMembers.size + botMembers.size).coerceAtMost(it.maxMembers))
+            }
+            if (activeLeague.draftStatus == DraftStatus.Complete) {
+                val existingPicks = draftPicksByLeagueId[activeLeague.id].orEmpty()
+                val unavailableNames = (
+                    existingPicks.map { it.artist.name.lowercase() } +
+                        waiverClaims.map { it.artist.name.lowercase() } +
+                        waiveredArtistDatesByLeagueId[activeLeague.id].orEmpty().keys
+                    ).toMutableSet()
+                val marketPool = (preloadedMarketArtists.orEmpty() + LocalBreakoutStore.loadMarketArtists(context)).ifEmpty {
+                    currentOnlineAccount()?.accessToken?.takeIf { it.isNotBlank() }
+                        ?.let { token -> SupabaseLeagueService.loadCachedMarketArtists(token).getOrDefault(emptyList()) }
+                        .orEmpty()
+                }
+                val pool = marketPool
+                    .filter { it.name.lowercase() !in unavailableNames }
+                    .sortedWith(
+                        compareByDescending<ArtistUi> { it.projectedWeekScore(currentLeagueWeek(activeLeague)) }
+                            .thenByDescending { it.breakoutScore(marketSnapshots[it.name.lowercase()]) }
+                            .thenByDescending { it.listeners ?: 0L }
+                    )
+                val remappedExistingPicks = existingPicks.map { pick ->
+                    val oldRound = ((pick.pickNumber - 1).coerceAtLeast(0) / oldMemberCount)
+                    val oldSlotInRound = ((pick.pickNumber - 1).coerceAtLeast(0) % oldMemberCount)
+                    pick.copy(pickNumber = oldRound * newMemberCount + oldSlotInRound + 1)
+                }
+                val rosterSlotsForDraft = activeRosterSlots(activeLeague.settings)
+                val botPicks = mutableListOf<DraftPickUi>()
+                botMembers.forEachIndexed { botIndex, bot ->
+                    val botRoster = mutableMapOf<RosterSlot, ArtistUi>()
+                    rosterSlotsForDraft.forEach { slot ->
+                        val pick = pool.firstOrNull { artist ->
+                            artist.name.lowercase() !in unavailableNames && slot.canHold(artist)
+                        }
+                        if (pick != null) {
+                            botRoster[slot] = pick
+                            unavailableNames += pick.name.lowercase()
+                        }
+                    }
+                    botPicks += botRoster.entries.map { (slot, artist) ->
+                        val round = rosterSlotsForDraft.indexOf(slot).coerceAtLeast(0)
+                        val botSlotInRound = oldMemberCount + botIndex
+                        DraftPickUi(
+                            pickNumber = round * newMemberCount + botSlotInRound + 1,
+                            pickedBy = bot.username,
+                            slot = slot,
+                            artist = artist,
+                            autoPicked = true
+                        )
+                    }
+                }
+                val updatedPicks = (remappedExistingPicks + botPicks).sortedBy { it.pickNumber }
+                draftPicksByLeagueId = draftPicksByLeagueId + (activeLeague.id to updatedPicks)
+                LocalBreakoutStore.saveLocalDraftPicks(
+                    context,
+                    activeLeague.id.ifBlank { activeLeague.inviteCode },
+                    updatedPicks.filter { it.pickedBy.isReservedBotUsername() }
+                )
+            }
+            delay(450)
+            botLoading = false
+            Toast.makeText(context, "${botMembers.size} bot${if (botMembers.size == 1) "" else "s"} added.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun forceCurrentAccountManager(activeLeague: LeagueUi) {
+        if (!devModeEnabled) return
+        val username = account?.username.orEmpty().ifBlank { return }
+        val currentMembers = leagueMembersById[activeLeague.id].orEmpty()
+        val existingSelf = currentMembers.firstOrNull { it.username.equals(username, ignoreCase = true) }
+        val updatedMembers = (
+            currentMembers.map { member ->
+                when {
+                    member.username.equals(username, ignoreCase = true) -> member.copy(role = "manager")
+                    member.role.equals("manager", ignoreCase = true) -> member.copy(role = "member")
+                    else -> member
+                }
+            } + if (existingSelf == null) {
+                listOf(LeagueMemberUi(username = username, teamName = username, role = "manager"))
+            } else {
+                emptyList()
+            }
+        ).distinctBy { it.username.lowercase() }
+        leagueMembersById = leagueMembersById + (activeLeague.id to updatedMembers)
+        LocalBreakoutStore.saveLocalMembers(
+            context,
+            activeLeague.id.ifBlank { activeLeague.inviteCode },
+            updatedMembers.filter { it.username.isReservedBotUsername() || it.username.equals(username, ignoreCase = true) }
+        )
+        leagues = leagues.map {
+            if (it.id == activeLeague.id || it.inviteCode == activeLeague.inviteCode) it.copy(isManager = true) else it
+        }
+        Toast.makeText(context, "Developer manager access enabled locally.", Toast.LENGTH_SHORT).show()
+    }
+
+    fun autoAcceptBotTrade(
+        activeLeague: LeagueUi,
+        bot: LeagueMemberUi,
+        offeredItems: List<TradeArtistItemUi>,
+        requestedItems: List<TradeArtistItemUi>
+    ) {
+        val username = account?.username.orEmpty()
+        if (username.isBlank() || !bot.username.isReservedBotUsername()) return
+        val existingPicks = draftPicksByLeagueId[activeLeague.id].orEmpty()
+        val offeredBySlot = offeredItems.mapIndexed { index, item -> item.slot to requestedItems.getOrNull(index) }.toMap()
+        val requestedBySlot = requestedItems.mapIndexed { index, item -> item.slot to offeredItems.getOrNull(index) }.toMap()
+        val updatedPicks = existingPicks.map { pick ->
+            when {
+                pick.pickedBy.equals(username, ignoreCase = true) && pick.slot in offeredBySlot.keys ->
+                    offeredBySlot[pick.slot]?.let { pick.copy(artist = it.artist) } ?: pick
+                pick.pickedBy.equals(bot.username, ignoreCase = true) && pick.slot in requestedBySlot.keys ->
+                    requestedBySlot[pick.slot]?.let { pick.copy(artist = it.artist) } ?: pick
+                else -> pick
+            }
+        }
+        draftPicksByLeagueId = draftPicksByLeagueId + (activeLeague.id to updatedPicks)
+        LocalBreakoutStore.saveLocalDraftPicks(
+            context,
+            activeLeague.id.ifBlank { activeLeague.inviteCode },
+            updatedPicks.filter { it.pickedBy.isReservedBotUsername() }
+        )
+        val updatedRosterFromPicks = updatedPicks
+            .filter { it.pickedBy.equals(username, ignoreCase = true) }
+            .associate { it.slot to it.artist }
+        val updatedRoster = (if (updatedRosterFromPicks.isNotEmpty()) updatedRosterFromPicks else roster)
+            .mapValues { (slot, artist) ->
+                offeredBySlot[slot]?.artist ?: artist
+            }
+        roster = updatedRoster
+        LocalBreakoutStore.saveRoster(context, updatedRoster, activeLeague.id.ifBlank { activeLeague.inviteCode })
+        val acceptedOffer = TradeOfferUi(
+            id = "bot-${System.currentTimeMillis()}",
+            proposerUsername = username,
+            recipientUsername = bot.username,
+            offeredItems = offeredItems,
+            requestedItems = requestedItems,
+            status = "accepted",
+            createdAt = Instant.now().toString(),
+            expiresAt = "",
+            incoming = false,
+            outgoing = true
+        )
+        tradeOffersByLeagueId = tradeOffersByLeagueId + (
+            activeLeague.id to (listOf(acceptedOffer) + tradeOffersByLeagueId[activeLeague.id].orEmpty())
+        )
+        LocalBreakoutStore.saveLocalTradeOffers(
+            context,
+            activeLeague.id.ifBlank { activeLeague.inviteCode },
+            tradeOffersByLeagueId[activeLeague.id].orEmpty()
+        )
+        Toast.makeText(context, "${bot.username} accepted the trade.", Toast.LENGTH_SHORT).show()
+    }
+
     fun cancelWaiverForLeague(activeLeague: LeagueUi, claim: WaiverClaimUi) {
         if (claim.id.isBlank() || !isOnlinePlayConfigured()) {
             waiverClaims = waiverClaims - claim
-            Toast.makeText(context, "${claim.artist.name} removed from waivers.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "${displayArtistNameForMode(claim.artist.name, encoreModeEnabled)} removed from waivers.", Toast.LENGTH_SHORT).show()
             return
         }
         scope.launch {
             val current = currentOnlineAccount()?.takeIf { it.accessToken.isNotBlank() } ?: return@launch
             SupabaseLeagueService.cancelWaiver(current.accessToken, claim.id)
                 .onSuccess {
-                    Toast.makeText(context, "${claim.artist.name} removed from waivers.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "${displayArtistNameForMode(claim.artist.name, encoreModeEnabled)} removed from waivers.", Toast.LENGTH_SHORT).show()
                     syncWaiversForLeague(activeLeague, force = true)
                 }
                 .onFailure { error -> Toast.makeText(context, cleanVisibleError(error.message), Toast.LENGTH_LONG).show() }
@@ -4512,7 +4972,7 @@ internal fun BreakoutApp(
                 .onSuccess { count ->
                     if (showToast) Toast.makeText(context, "$count waiver claim${if (count == 1) "" else "s"} processed.", Toast.LENGTH_SHORT).show()
                     SupabaseLeagueService.loadDraftPicks(current.accessToken, activeLeague.id).onSuccess { picks ->
-                        draftPicksByLeagueId = draftPicksByLeagueId + (activeLeague.id to picks)
+                        draftPicksByLeagueId = draftPicksByLeagueId + (activeLeague.id to draftPicksWithLocalBots(activeLeague.id, picks))
                     }
                     SupabaseLeagueService.loadLeagueRosters(current.accessToken, activeLeague.id).onSuccess { rostersByUser ->
                         rostersByUser[current.username]?.let { myRoster ->
@@ -4565,10 +5025,10 @@ internal fun BreakoutApp(
                     }
                     league?.id?.takeIf { it.isNotBlank() }?.let { leagueId ->
                         SupabaseLeagueService.loadMembers(current.accessToken, leagueId).onSuccess { loadedMembers ->
-                            leagueMembersById = leagueMembersById + (leagueId to loadedMembers)
+                            leagueMembersById = leagueMembersById + (leagueId to membersWithLocalBots(leagueId, loadedMembers))
                         }
                         SupabaseLeagueService.loadDraftPicks(current.accessToken, leagueId).onSuccess { picks ->
-                            draftPicksByLeagueId = draftPicksByLeagueId + (leagueId to picks)
+                            draftPicksByLeagueId = draftPicksByLeagueId + (leagueId to draftPicksWithLocalBots(leagueId, picks))
                         }
                         SupabaseLeagueService.loadLeagueRosters(current.accessToken, leagueId).onSuccess { rostersByUser ->
                             rostersByUser[current.username]?.let { myRoster ->
@@ -4592,7 +5052,7 @@ internal fun BreakoutApp(
                                     )
                                 }
                             }
-                            tradeOffersByLeagueId = tradeOffersByLeagueId + (leagueId to offers)
+                            tradeOffersByLeagueId = tradeOffersByLeagueId + (leagueId to tradeOffersWithLocalBots(leagueId, offers))
                         }
                         SupabaseLeagueService.loadWaivers(current.accessToken, leagueId).onSuccess { sync ->
                             waiverClaims = sync.claims
@@ -4700,7 +5160,7 @@ internal fun BreakoutApp(
         scope.launch {
             val current = currentOnlineAccount() ?: return@launch
             SupabaseLeagueService.loadMembers(current.accessToken, target.id).onSuccess { loadedMembers ->
-                leagueMembersById = leagueMembersById + (target.id to loadedMembers)
+                leagueMembersById = leagueMembersById + (target.id to membersWithLocalBots(target.id, loadedMembers))
             }
         }
     }
@@ -4718,7 +5178,7 @@ internal fun BreakoutApp(
                         applyRemoteLeagues(remoteLeagues)
                     }
                     SupabaseLeagueService.loadMembers(current.accessToken, active.id).onSuccess { loadedMembers ->
-                        leagueMembersById = leagueMembersById + (active.id to loadedMembers)
+                        leagueMembersById = leagueMembersById + (active.id to membersWithLocalBots(active.id, loadedMembers))
                     }
                 } else {
                     refreshRemoteLeagues()
@@ -4747,7 +5207,7 @@ internal fun BreakoutApp(
                         )
                     }
                 }
-                tradeOffersByLeagueId = tradeOffersByLeagueId + (target.id to offers)
+                tradeOffersByLeagueId = tradeOffersByLeagueId + (target.id to tradeOffersWithLocalBots(target.id, offers))
             }
         }
     }
@@ -4834,10 +5294,10 @@ internal fun BreakoutApp(
         val activeAfterLoad = startupLeagues.firstOrNull { it.inviteCode == activeLeagueCode } ?: startupLeagues.firstOrNull()
         if (current?.accessToken?.isNotBlank() == true && activeAfterLoad?.id?.isNotBlank() == true) {
             SupabaseLeagueService.loadMembers(current.accessToken, activeAfterLoad.id).onSuccess { loadedMembers ->
-                leagueMembersById = leagueMembersById + (activeAfterLoad.id to loadedMembers)
+                leagueMembersById = leagueMembersById + (activeAfterLoad.id to membersWithLocalBots(activeAfterLoad.id, loadedMembers))
             }
             SupabaseLeagueService.loadDraftPicks(current.accessToken, activeAfterLoad.id).onSuccess { picks ->
-                draftPicksByLeagueId = draftPicksByLeagueId + (activeAfterLoad.id to picks)
+                draftPicksByLeagueId = draftPicksByLeagueId + (activeAfterLoad.id to draftPicksWithLocalBots(activeAfterLoad.id, picks))
                 prefetchArtistImages(context, picks.map { it.artist }, limit = 180)
             }
             SupabaseLeagueService.loadLeagueRosters(current.accessToken, activeAfterLoad.id).onSuccess { rostersByUser ->
@@ -4848,7 +5308,7 @@ internal fun BreakoutApp(
                 prefetchArtistImages(context, rostersByUser.values.flatMap { it.values }, limit = 180)
             }
             SupabaseLeagueService.loadTradeOffers(current.accessToken, activeAfterLoad.id).onSuccess { offers ->
-                tradeOffersByLeagueId = tradeOffersByLeagueId + (activeAfterLoad.id to offers)
+                tradeOffersByLeagueId = tradeOffersByLeagueId + (activeAfterLoad.id to tradeOffersWithLocalBots(activeAfterLoad.id, offers))
             }
             SupabaseLeagueService.loadWaivers(current.accessToken, activeAfterLoad.id).onSuccess { sync ->
                 waiverClaims = sync.claims
@@ -4924,10 +5384,10 @@ internal fun BreakoutApp(
                 applyRemoteLeagues(remoteLeagues)
                 remoteLeagues.firstOrNull { it.inviteCode == activeLeagueCode }?.id?.takeIf { it.isNotBlank() }?.let { leagueId ->
                     SupabaseLeagueService.loadMembers(current.accessToken, leagueId).onSuccess { loadedMembers ->
-                        leagueMembersById = leagueMembersById + (leagueId to loadedMembers)
+                        leagueMembersById = leagueMembersById + (leagueId to membersWithLocalBots(leagueId, loadedMembers))
                     }
                     SupabaseLeagueService.loadDraftPicks(current.accessToken, leagueId).onSuccess { picks ->
-                        draftPicksByLeagueId = draftPicksByLeagueId + (leagueId to picks)
+                        draftPicksByLeagueId = draftPicksByLeagueId + (leagueId to draftPicksWithLocalBots(leagueId, picks))
                     }
                     SupabaseLeagueService.loadLeagueRosters(current.accessToken, leagueId).onSuccess { rostersByUser ->
                         rostersByUser[current.username]?.let { myRoster ->
@@ -4950,7 +5410,7 @@ internal fun BreakoutApp(
                                 )
                             }
                         }
-                        tradeOffersByLeagueId = tradeOffersByLeagueId + (leagueId to offers)
+                        tradeOffersByLeagueId = tradeOffersByLeagueId + (leagueId to tradeOffersWithLocalBots(leagueId, offers))
                     }
                     SupabaseLeagueService.loadWaivers(current.accessToken, leagueId).onSuccess { sync ->
                         waiverClaims = sync.claims
@@ -4996,6 +5456,24 @@ internal fun BreakoutApp(
             waiveredArtistDatesByLeagueId = waiveredArtistDatesByLeagueId + (key to LocalBreakoutStore.loadWaiveredArtistDates(context, key))
         }
         league?.let { active ->
+            val savedLocalMembers = LocalBreakoutStore.loadLocalMembers(context, leagueKey)
+            if (savedLocalMembers.isNotEmpty()) {
+                leagueMembersById = leagueMembersById + (
+                    active.id to membersWithLocalBots(active.id, leagueMembersById[active.id].orEmpty() + savedLocalMembers)
+                )
+            }
+            val savedLocalPicks = LocalBreakoutStore.loadLocalDraftPicks(context, leagueKey)
+            if (savedLocalPicks.isNotEmpty()) {
+                draftPicksByLeagueId = draftPicksByLeagueId + (
+                    active.id to draftPicksWithLocalBots(active.id, draftPicksByLeagueId[active.id].orEmpty() + savedLocalPicks)
+                )
+            }
+            val savedLocalTrades = LocalBreakoutStore.loadLocalTradeOffers(context, leagueKey)
+            if (savedLocalTrades.isNotEmpty()) {
+                tradeOffersByLeagueId = tradeOffersByLeagueId + (
+                    active.id to tradeOffersWithLocalBots(active.id, tradeOffersByLeagueId[active.id].orEmpty() + savedLocalTrades)
+                )
+            }
             syncWaiversForLeague(active, force = true)
         }
     }
@@ -5169,14 +5647,14 @@ internal fun BreakoutApp(
                         val current = currentOnlineAccount()?.takeIf { it.accessToken.isNotBlank() }
                         if (current != null && selected.id.isNotBlank()) {
                             SupabaseLeagueService.loadMembers(current.accessToken, selected.id).onSuccess { loadedMembers ->
-                                leagueMembersById = leagueMembersById + (selected.id to loadedMembers)
+                                leagueMembersById = leagueMembersById + (selected.id to membersWithLocalBots(selected.id, loadedMembers))
                             }
                             SupabaseLeagueService.loadDraftPicks(current.accessToken, selected.id).onSuccess { picks ->
-                                draftPicksByLeagueId = draftPicksByLeagueId + (selected.id to picks)
+                                draftPicksByLeagueId = draftPicksByLeagueId + (selected.id to draftPicksWithLocalBots(selected.id, picks))
                                 prefetchArtistImages(context, picks.map { it.artist }, limit = 180)
                             }
                             SupabaseLeagueService.loadTradeOffers(current.accessToken, selected.id).onSuccess { offers ->
-                                tradeOffersByLeagueId = tradeOffersByLeagueId + (selected.id to offers)
+                                tradeOffersByLeagueId = tradeOffersByLeagueId + (selected.id to tradeOffersWithLocalBots(selected.id, offers))
                             }
                         }
                         leagueSwitchProgress = 0.78f
@@ -5264,7 +5742,18 @@ internal fun BreakoutApp(
                 } else {
                     val activeDraftRoomOpen = draftRoomOpen && draftRoomLeagueId == activeLeague.id
                     val visibleRoster = rosterForAccount(activeLeague)
-                    CompositionLocalProvider(LocalNavigationRefreshTick provides navigationRefreshTick) {
+                    val activeSimulatedWeekOffset = if (devModeEnabled) (simulatedWeekOffsetByLeagueId[activeLeague.id] ?: 0) else 0
+                    val forceRosterUnlocked = devModeEnabled && forceRosterUnlockedByLeagueId[activeLeague.id] == true
+                    val forceRosterLocked = devModeEnabled && forceRosterLockedByLeagueId[activeLeague.id] == true
+                    val weekOneStart = leagueWeekOneStartDate(activeLeague)
+                    val naturalRosterMovesLocked = activeLeague.draftStatus == DraftStatus.Complete &&
+                        weekOneStart != null &&
+                        !LocalDate.now().isBefore(weekOneStart)
+                    val rosterMovesLocked = (naturalRosterMovesLocked || forceRosterLocked) && !forceRosterUnlocked
+                    CompositionLocalProvider(
+                        LocalNavigationRefreshTick provides navigationRefreshTick,
+                        LocalEncoreMode provides encoreModeEnabled
+                    ) {
                         AnimatedContent(
                             targetState = selectedTab,
                             transitionSpec = {
@@ -5361,6 +5850,13 @@ internal fun BreakoutApp(
                             onPreviousFilterChange = { marketPreviousFilter = it },
                             marketState = marketState,
                             onMarketStateChange = { marketState = it },
+                            searchResultCache = marketSearchCache,
+                            onCacheSearchResults = { key, artists ->
+                                marketSearchCache = marketSearchCache + (key to artists)
+                            },
+                            onClearSearchResults = { key ->
+                                marketSearchCache = marketSearchCache - key
+                            },
                             snapshots = marketSnapshots,
                             onSnapshotsChange = { marketSnapshots = it },
                             visibleCount = marketVisibleCount,
@@ -5368,10 +5864,6 @@ internal fun BreakoutApp(
                             resetTick = marketResetTick,
                             lastMarketKey = marketLastKey,
                             onLastMarketKeyChange = { marketLastKey = it },
-                            scrollPositions = marketScrollPositions,
-                            onScrollPositionChange = { key, value ->
-                                marketScrollPositions = marketScrollPositions + (key to value)
-                            },
                             loadedMarketKey = marketLoadedKey,
                             onLoadedMarketKeyChange = { marketLoadedKey = it },
                             openActionArtistKey = openMarketActionArtistKey,
@@ -5432,7 +5924,7 @@ internal fun BreakoutApp(
                                     droppedArtistDatesByLeagueId = droppedArtistDatesByLeagueId + (
                                         activeLeague.id to (droppedArtistDatesByLeagueId[activeLeague.id].orEmpty() + (artist.name.lowercase() to System.currentTimeMillis()))
                                     )
-                                    Toast.makeText(context, "${artist.name} dropped.", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "${displayArtistNameForMode(artist.name, encoreModeEnabled)} dropped.", Toast.LENGTH_SHORT).show()
                                 }
                             },
                             onQueueWaiverArtist = { artist, dropSlot ->
@@ -5454,6 +5946,7 @@ internal fun BreakoutApp(
                             leagueSettings = activeLeague.settings,
                             memberCount = activeLeague.memberCount,
                             draftStatus = activeLeague.draftStatus,
+                            rosterMovesLocked = rosterMovesLocked,
                             draftRoomContext = activeDraftRoomOpen,
                             refreshing = refreshingLeagueData,
                             onRefresh = ::refreshRemoteLeagues,
@@ -5473,8 +5966,11 @@ internal fun BreakoutApp(
                                 roster = roster - slot
                             },
                             onMoveArtist = { from, to ->
-                                val fromArtist = visibleRoster[from]
-                                if (fromArtist != null) {
+                                if (rosterMovesLocked && (!from.isBenchSlot() || !to.isBenchSlot())) {
+                                    Toast.makeText(context, "Roster moves are locked for this scoring week.", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    val fromArtist = visibleRoster[from]
+                                    if (fromArtist != null) {
                                     val toArtist = visibleRoster[to]
                                     val previousRoster = roster
                                     val previousDraftPicks = draftPicksByLeagueId[activeLeague.id].orEmpty()
@@ -5521,6 +6017,7 @@ internal fun BreakoutApp(
                                                 }
                                         }
                                     }
+                                    }
                                 }
                             },
                             onRunWaivers = { runWaiversForLeague(activeLeague, visibleRoster) },
@@ -5538,6 +6035,7 @@ internal fun BreakoutApp(
                             roster = visibleRoster,
                             draftPicks = draftPicksByLeagueId[activeLeague.id].orEmpty(),
                             members = leagueMembersById[activeLeague.id],
+                            weekOffset = activeSimulatedWeekOffset,
                             refreshing = refreshingLeagueData,
                             onRefresh = ::refreshRemoteLeagues,
                             onOpenMenu = { scope.launch { drawerState.open() } },
@@ -5553,9 +6051,11 @@ internal fun BreakoutApp(
                         )
                         BreakoutTab.AllMatchups -> AllMatchupsScreen(
                             league = activeLeague,
+                            currentUsername = account?.username.orEmpty(),
                             members = leagueMembersById[activeLeague.id],
                             draftPicks = draftPicksByLeagueId[activeLeague.id].orEmpty(),
                             initialWeek = selectedAllMatchupsWeek,
+                            weekOffset = activeSimulatedWeekOffset,
                             refreshing = refreshingLeagueData,
                             onRefresh = ::refreshRemoteLeagues,
                             onOpenMenu = { scope.launch { drawerState.open() } },
@@ -5563,6 +6063,10 @@ internal fun BreakoutApp(
                         )
                         BreakoutTab.Standings -> StandingsScreen(
                             league = activeLeague,
+                            currentUsername = account?.username.orEmpty(),
+                            members = leagueMembersById[activeLeague.id].orEmpty(),
+                            draftPicks = draftPicksByLeagueId[activeLeague.id].orEmpty(),
+                            weekOffset = activeSimulatedWeekOffset,
                             refreshing = refreshingLeagueData,
                             onRefresh = ::refreshRemoteLeagues,
                             onOpenMenu = { scope.launch { drawerState.open() } }
@@ -5580,10 +6084,44 @@ internal fun BreakoutApp(
                             league = activeLeague,
                             account = account,
                             draftPicks = draftPicksByLeagueId[activeLeague.id].orEmpty(),
+                            localMembers = leagueMembersById[activeLeague.id].orEmpty().filter {
+                                it.username.isReservedBotUsername() || it.username.equals(account?.username.orEmpty(), ignoreCase = true)
+                            },
                             refreshing = refreshingLeagueData,
                             onRefresh = ::refreshRemoteLeagues,
                             onOpenMenu = { scope.launch { drawerState.open() } },
                             onUpdateLeague = ::updateActiveLeague,
+                            devModeEnabled = devModeEnabled,
+                            simulatedWeekOffset = activeSimulatedWeekOffset,
+                            maxSimulatedWeekOffset = (activeLeague.settings.seasonWeeks - currentLeagueWeek(activeLeague, activeSimulatedWeekOffset)).coerceAtLeast(0),
+                            rostersLocked = rosterMovesLocked,
+                            forceRosterUnlocked = forceRosterUnlocked,
+                            forceRosterLocked = forceRosterLocked,
+                            onSimulateWeeks = { weeks ->
+                                scope.launch {
+                                    simulationLoading = true
+                                    delay(700)
+                                    val liveWeek = currentLeagueWeek(activeLeague)
+                                    val maxOffset = (activeLeague.settings.seasonWeeks - liveWeek).coerceAtLeast(0)
+                                    val nextOffset = if (weeks == 0) 0 else (activeSimulatedWeekOffset + weeks).coerceIn(0, maxOffset)
+                                    simulatedWeekOffsetByLeagueId = simulatedWeekOffsetByLeagueId + (
+                                        activeLeague.id to nextOffset
+                                    )
+                                    selectedAllMatchupsWeek = (liveWeek + nextOffset).coerceIn(1, activeLeague.settings.seasonWeeks.coerceAtLeast(1))
+                                    delay(350)
+                                    simulationLoading = false
+                                }
+                            },
+                            onForceRosterUnlockedChange = { unlocked ->
+                                forceRosterUnlockedByLeagueId = forceRosterUnlockedByLeagueId + (activeLeague.id to unlocked)
+                                if (unlocked) forceRosterLockedByLeagueId = forceRosterLockedByLeagueId + (activeLeague.id to false)
+                            },
+                            onForceRosterLockedChange = { locked ->
+                                forceRosterLockedByLeagueId = forceRosterLockedByLeagueId + (activeLeague.id to locked)
+                                if (locked) forceRosterUnlockedByLeagueId = forceRosterUnlockedByLeagueId + (activeLeague.id to false)
+                            },
+                            onAddBotMembers = { count -> addBotMembersToLeague(activeLeague, count) },
+                            onForceMakeManager = { forceCurrentAccountManager(activeLeague) },
                             onTransferManager = ::transferManager,
                             onKickMember = ::kickMember,
                             onOpenRoster = {
@@ -5606,6 +6144,7 @@ internal fun BreakoutApp(
                                 initialTradeMemberUsername = member.username
                                 selectedArtist = null
                                 selectedArtistReadOnly = false
+                                previousTab = BreakoutTab.League
                                 selectedTab = BreakoutTab.Trades
                             },
                             onRunWaivers = { runWaiversForLeague(activeLeague, visibleRoster, showToast = true) },
@@ -5628,7 +6167,9 @@ internal fun BreakoutApp(
                             initialTradeUsername = initialTradeMemberUsername,
                             onInitialTradeUsernameConsumed = { initialTradeMemberUsername = null },
                             onSendTrade = { member, offeredItems, requestedItems ->
-                                scope.launch {
+                                if (member.username.isReservedBotUsername()) {
+                                    autoAcceptBotTrade(activeLeague, member, offeredItems, requestedItems)
+                                } else scope.launch {
                                     val current = currentOnlineAccount()?.takeIf { it.accessToken.isNotBlank() }
                                     if (current == null) {
                                         Toast.makeText(context, "Sign in again to send trades.", Toast.LENGTH_SHORT).show()
@@ -5718,6 +6259,18 @@ internal fun BreakoutApp(
                         )
                         BreakoutTab.Account -> AccountScreen(
                             account = account,
+                            devModeAllowed = BreakoutDevModesAllowed,
+                            spotlightModeAllowed = BreakoutSpotlightModeAllowed,
+                            devModeEnabled = devModeEnabled,
+                            spotlightModeEnabled = encoreModeEnabled,
+                            onDevModeChange = { enabled ->
+                                devModeRequested = enabled
+                                LocalBreakoutStore.saveDevModeEnabled(context, enabled)
+                            },
+                            onSpotlightModeChange = { enabled ->
+                                spotlightModeRequested = enabled
+                                LocalBreakoutStore.saveEncoreModeEnabled(context, enabled)
+                            },
                             onOpenMenu = { scope.launch { drawerState.open() } },
                             onSaveAccount = { updatedAccount, onResult ->
                                 scope.launch {
@@ -5778,6 +6331,7 @@ internal fun BreakoutApp(
                         modifier = Modifier.fillMaxSize()
                     ) {
                         detailArtistForAnimation?.let { artist ->
+                        CompositionLocalProvider(LocalEncoreMode provides encoreModeEnabled) {
                         val droppedNames = droppedArtistsByLeagueId[activeLeague.id].orEmpty()
                         val originalDraftedPick = draftPicksByLeagueId[activeLeague.id].orEmpty()
                             .firstOrNull { it.artist.name.equals(artist.name, ignoreCase = true) }
@@ -5791,15 +6345,29 @@ internal fun BreakoutApp(
                             }
                         fun displayUser(username: String): String =
                             if (username.equals(account?.username.orEmpty(), ignoreCase = true)) "You" else username
+                        val detailArtist = preloadedMarketArtists.orEmpty()
+                            .firstOrNull { cached ->
+                                cached.name.artistKey() == artist.name.artistKey() &&
+                                    cached.listeners != null &&
+                                    (cached.currentListenersSource?.contains("Pastspot", ignoreCase = true) == true ||
+                                        cached.source.contains("Pastspot", ignoreCase = true) ||
+                                        cached.snapshotListeners != null)
+                            }
+                            ?: artist
                         Surface(
                             modifier = Modifier.fillMaxSize(),
                             color = MaterialTheme.colorScheme.background
                         ) {
                             ArtistDetailScreen(
-                                artist = artist,
+                                artist = detailArtist,
                                 isInRoster = visibleRoster.values.any { it.name == artist.name },
                                 draftStatus = activeLeague.draftStatus,
-                                weeklyPoints = weeklyPointsForArtist(artist, activeLeague),
+                                weeklyPoints = weeklyPointsForArtist(
+                                    detailArtist,
+                                    activeLeague,
+                                    weekOffset = activeSimulatedWeekOffset
+                                ),
+                                refreshing = refreshingLeagueData,
                                 draftedStatusLabel = draftedPick?.let {
                                     val safeMembers = activeLeague.memberCount.coerceAtLeast(1)
                                     val round = ((it.pickNumber - 1) / safeMembers) + 1
@@ -5859,11 +6427,13 @@ internal fun BreakoutApp(
                                 cancelWaiverArtistForLeague(activeLeague, artist)
                             },
                             onDraftPick = { makeDraftPick(artist, activeLeague) },
+                            onRefresh = ::refreshRemoteLeagues,
                             onBack = {
                                 selectedArtist = null
                                 selectedArtistReadOnly = false
                             }
                         )
+                        }
                         }
                         }
                     }
@@ -5904,15 +6474,33 @@ internal fun BreakoutApp(
             }
         }
         AnimatedVisibility(
-            visible = startupLoading || leagueSwitchLoading,
+            visible = startupLoading || leagueSwitchLoading || simulationLoading || botLoading,
             enter = fadeIn(animationSpec = tween(220)) + slideInVertically(animationSpec = tween(220)) { it / 16 },
             exit = slideOutVertically(animationSpec = tween(420)) { -it },
             modifier = Modifier.fillMaxSize()
         ) {
-            AppStartupLoadingScreen(
-                progress = if (startupLoading) startupProgress else leagueSwitchProgress,
-                message = if (startupLoading) startupMessage else leagueSwitchMessage
-            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
+            ) {
+            when {
+                simulationLoading -> BreakoutActionLoadingScreen(
+                    title = "Simulating League",
+                    lines = listOf("Finishing the current week", "Updating matchup views", "Settling simulated scores"),
+                    accent = BreakoutSecondary
+                )
+                botLoading -> BreakoutActionLoadingScreen(
+                    title = "Adding Bots",
+                    lines = listOf("Creating test members", "Checking available artists", "Building bot rosters"),
+                    accent = WaiverAccent
+                )
+                else -> AppStartupLoadingScreen(
+                    progress = if (startupLoading) startupProgress else leagueSwitchProgress,
+                    message = if (startupLoading) startupMessage else leagueSwitchMessage
+                )
+            }
+            }
         }
     }
 }

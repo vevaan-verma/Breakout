@@ -197,6 +197,7 @@ internal fun RosterScreen(
     leagueSettings: LeagueSettingsUi,
     memberCount: Int,
     draftStatus: DraftStatus,
+    rosterMovesLocked: Boolean = false,
     draftRoomContext: Boolean,
     refreshing: Boolean,
     onRefresh: () -> Unit,
@@ -239,6 +240,11 @@ internal fun RosterScreen(
                 title = "Roster Locked",
                 detail = "Rosters are filled during the live draft."
             )
+        } else if (rosterMovesLocked) {
+            StatusCard(
+                title = "Lineup Locked",
+                detail = "Active roster slots are locked for this scoring week. Bench artists can still be swapped with each other."
+            )
         }
         Column(
             modifier = Modifier
@@ -255,10 +261,13 @@ internal fun RosterScreen(
                     draftRoomContext = draftRoomContext,
                     onArtistSelected = onArtistSelected,
                     onOpenMarket = { onOpenMarket(slot.filter) },
-                    canRemove = draftStatus != DraftStatus.Live,
-                    canMove = draftStatus == DraftStatus.Complete,
+                    canRemove = draftStatus != DraftStatus.Live && (!rosterMovesLocked || slot.isBenchSlot()),
+                    canMove = draftStatus == DraftStatus.Complete && (!rosterMovesLocked || slot.isBenchSlot()),
+                    locked = rosterMovesLocked && !slot.isBenchSlot(),
                     onMoveArtist = {
-                        roster[slot]?.let { pendingMove = slot to it } ?: run { pendingFillSlot = slot }
+                        roster[slot]?.let { pendingMove = slot to it } ?: run {
+                            pendingFillSlot = slot
+                        }
                     },
                     onRemoveArtist = { roster[slot]?.let { pendingDrop = slot to it } }
                 )
@@ -272,22 +281,43 @@ internal fun RosterScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column {
-                        Text("Waiver Queue", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
-                        Text("Order your claims before waivers process.", color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "Waiver Queue",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Black
+                        )
+                        Text(
+                            "Order your claims before waivers process.",
+                            color = BreakoutTextSecondary,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
                     }
-                    Text("${waiverClaims.size}/${leagueSettings.maxWaiverClaims}", color = WaiverAccent, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
+                    Text(
+                        "${waiverClaims.size}/${leagueSettings.maxWaiverClaims}",
+                        color = WaiverAccent,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Black
+                    )
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.CardSpacing)) {
                     StatTile("Waiver Priority", "#1", "This week", Modifier.weight(1f))
-                    StatTile("Open Slots", slots.count { roster[it] == null }.toString(), "Roster space", Modifier.weight(1f))
+                    StatTile(
+                        "Open Slots",
+                        slots.count { roster[it] == null }.toString(),
+                        "Roster space",
+                        Modifier.weight(1f)
+                    )
                 }
                 if (waiverClaims.isEmpty()) {
-                    Text("Queue claims from artist pages when you have a matching open slot.", color = BreakoutTextSecondary)
+                    Text(
+                        "Queue claims from artist pages when you have a matching open slot.",
+                        color = BreakoutTextSecondary
+                    )
                 } else {
                     val waiverRowHeight = 202
                     val waiverListHeight = waiverClaims.size * waiverRowHeight +
-                        (waiverClaims.size - 1).coerceAtLeast(0) * 8 +
-                        30
+                            (waiverClaims.size - 1).coerceAtLeast(0) * 8 +
+                            30
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -295,12 +325,27 @@ internal fun RosterScreen(
                         userScrollEnabled = false,
                         verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
                     ) {
-                        items(waiverClaims, key = { claim -> "${claim.artist.stableListKey()}:${claim.slot.name}" }) { claim ->
+                        items(
+                            waiverClaims,
+                            key = { claim -> "${claim.artist.stableListKey()}:${claim.slot.name}" }) { claim ->
                             val index = waiverClaims.indexOf(claim)
-                            val cleanDropName = claim.dropArtistName?.takeUnless { it.isBlank() || it.equals("null", ignoreCase = true) }
-                            val displayClaim = if (cleanDropName == claim.dropArtistName) claim else claim.copy(dropArtistName = cleanDropName)
+                            val cleanDropName = claim.dropArtistName?.takeUnless {
+                                it.isBlank() || it.equals(
+                                    "null",
+                                    ignoreCase = true
+                                )
+                            }
+                            val displayClaim =
+                                if (cleanDropName == claim.dropArtistName) claim else claim.copy(
+                                    dropArtistName = cleanDropName
+                                )
                             val dropArtist = cleanDropName?.let { dropName ->
-                                roster.values.firstOrNull { it.name.equals(dropName, ignoreCase = true) }
+                                roster.values.firstOrNull {
+                                    it.name.equals(
+                                        dropName,
+                                        ignoreCase = true
+                                    )
+                                }
                             }
                             WaiverClaimRow(
                                 modifier = Modifier.animateItem(),
@@ -327,8 +372,16 @@ internal fun RosterScreen(
             }
             if (waiverResults.isNotEmpty()) {
                 BreakoutCard {
-                    Text("Waiver History", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
-                    Text("Latest processed claims from this league.", color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "Waiver History",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Black
+                    )
+                    Text(
+                        "Latest processed claims from this league.",
+                        color = BreakoutTextSecondary,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
                     Column(verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)) {
                         waiverResults.forEach { result ->
                             WaiverResultRow(result)
@@ -339,7 +392,7 @@ internal fun RosterScreen(
         }
         pendingDrop?.let { (slot, artist) ->
             ConfirmActionCard(
-                title = "Drop ${artist.name}?",
+                title = "Drop ${artist.displayName()}?",
                 detail = "This removes the artist from your roster.",
                 confirmText = "Drop",
                 onCancel = { pendingDrop = null },
@@ -352,8 +405,9 @@ internal fun RosterScreen(
         pendingMove?.let { (fromSlot, artist) ->
             val moveTargets = slots.filter { targetSlot ->
                 targetSlot != fromSlot &&
-                    targetSlot.canHold(artist) &&
-                    roster[targetSlot]?.let { fromSlot.canHold(it) } != false
+                        (!rosterMovesLocked || (fromSlot.isBenchSlot() && targetSlot.isBenchSlot())) &&
+                        targetSlot.canHold(artist) &&
+                        roster[targetSlot]?.let { fromSlot.canHold(it) } != false
             }
             MoveRosterSlotDialog(
                 artist = artist,
@@ -368,7 +422,12 @@ internal fun RosterScreen(
         }
         pendingFillSlot?.let { targetSlot ->
             val sourceOptions = roster.entries
-                .filter { (sourceSlot, artist) -> sourceSlot != targetSlot && targetSlot.canHold(artist) }
+                .filter { (sourceSlot, artist) ->
+                    (!rosterMovesLocked || (sourceSlot.isBenchSlot() && targetSlot.isBenchSlot())) &&
+                    sourceSlot != targetSlot && targetSlot.canHold(
+                        artist
+                    )
+                }
             FillRosterSlotDialog(
                 slot = targetSlot,
                 options = sourceOptions,
@@ -382,7 +441,7 @@ internal fun RosterScreen(
         pendingCancelWaiver?.let { claim ->
             ConfirmActionCard(
                 title = "Cancel Claim?",
-                detail = "This removes ${claim.artist.name} from your waiver queue.",
+                detail = "This removes ${claim.artist.displayName()} from your waiver queue.",
                 confirmText = "Cancel Claim",
                 onCancel = { pendingCancelWaiver = null },
                 onConfirm = {
@@ -415,10 +474,21 @@ internal fun MoveRosterSlotDialog(
                     .padding(BreakoutDimensions.xl),
                 verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.md)
             ) {
-                Text("Move ${artist.name}", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text("Choose a slot this artist can occupy.", color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    "Move ${artist.displayName()}",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    "Choose a slot this artist can occupy.",
+                    color = BreakoutTextSecondary,
+                    style = MaterialTheme.typography.bodyMedium
+                )
                 if (targets.isEmpty()) {
-                    StatusCard("No Valid Slots", "This artist cannot move into any open or swappable slot right now.")
+                    StatusCard(
+                        "No Valid Slots",
+                        "This artist cannot move into any open or swappable slot right now."
+                    )
                 } else {
                     targets.forEach { slot ->
                         val occupant = roster[slot]
@@ -436,14 +506,22 @@ internal fun MoveRosterSlotDialog(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 if (occupant != null) {
-                                    ArtistArtwork(artist = occupant, size = BreakoutDimensions.ArtworkList)
+                                    ArtistArtwork(
+                                        artist = occupant,
+                                        size = BreakoutDimensions.ArtworkList
+                                    )
                                 } else {
                                     EmptySlotArtwork()
                                 }
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text(slot.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                                     Text(
-                                        occupant?.let { "Swap with ${it.name}" } ?: "Open slot",
+                                        slot.label,
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        occupant?.let { "Swap with ${it.displayName()}" }
+                                            ?: "Open slot",
                                         color = BreakoutTextSecondary,
                                         style = MaterialTheme.typography.bodyMedium,
                                         maxLines = 1,
@@ -455,7 +533,11 @@ internal fun MoveRosterSlotDialog(
                         }
                     }
                 }
-                SecondaryButton(text = "Close", modifier = Modifier.fillMaxWidth(), onClick = onDismiss)
+                SecondaryButton(
+                    text = "Close",
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = onDismiss
+                )
             }
         }
     }
@@ -481,10 +563,21 @@ internal fun FillRosterSlotDialog(
                     .padding(BreakoutDimensions.xl),
                 verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.md)
             ) {
-                Text("Fill ${slot.label}", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text("Move a compatible artist into this open slot.", color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    "Fill ${slot.label}",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    "Move a compatible artist into this open slot.",
+                    color = BreakoutTextSecondary,
+                    style = MaterialTheme.typography.bodyMedium
+                )
                 if (options.isEmpty()) {
-                    StatusCard("No Compatible Artists", "No current roster artist can move into this slot.")
+                    StatusCard(
+                        "No Compatible Artists",
+                        "No current roster artist can move into this slot."
+                    )
                 } else {
                     options.forEach { (sourceSlot, artist) ->
                         Surface(
@@ -500,17 +593,36 @@ internal fun FillRosterSlotDialog(
                                 horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.md),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                ArtistArtwork(artist = artist, size = BreakoutDimensions.ArtworkList)
+                                ArtistArtwork(
+                                    artist = artist,
+                                    size = BreakoutDimensions.ArtworkList
+                                )
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text(artist.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    Text("From ${sourceSlot.label}", color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(
+                                        artist.displayName(),
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        "From ${sourceSlot.label}",
+                                        color = BreakoutTextSecondary,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                 }
                                 Text("Move", color = BreakoutPrimary, fontWeight = FontWeight.Bold)
                             }
                         }
                     }
                 }
-                SecondaryButton(text = "Close", modifier = Modifier.fillMaxWidth(), onClick = onDismiss)
+                SecondaryButton(
+                    text = "Close",
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = onDismiss
+                )
             }
         }
     }
@@ -566,8 +678,18 @@ internal fun WaiverClaimRow(
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("#", color = WaiverAccent.copy(alpha = 0.82f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Black)
-                        Text(priority.toString(), color = WaiverAccent, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                        Text(
+                            "#",
+                            color = WaiverAccent.copy(alpha = 0.82f),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Black
+                        )
+                        Text(
+                            priority.toString(),
+                            color = WaiverAccent,
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.Black
+                        )
                     }
                 }
 
@@ -580,7 +702,7 @@ internal fun WaiverClaimRow(
                     verticalArrangement = Arrangement.Center
                 ) {
                     Text(
-                        text = claim.artist.name,
+                        text = claim.artist.displayName(),
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Black,
                         maxLines = 1,
@@ -709,7 +831,10 @@ private fun WaiverReorderButton(
             .clickable(enabled = enabled, onClick = onClick),
         color = if (enabled) BreakoutSurfaceVariant else BreakoutSurfaceVariant.copy(alpha = 0.42f),
         shape = RoundedCornerShape(999.dp),
-        border = BorderStroke(1.dp, if (enabled) BreakoutPrimary.copy(alpha = 0.42f) else BreakoutOutline.copy(alpha = 0.25f))
+        border = BorderStroke(
+            1.dp,
+            if (enabled) BreakoutPrimary.copy(alpha = 0.42f) else BreakoutOutline.copy(alpha = 0.25f)
+        )
     ) {
         Box(contentAlignment = Alignment.Center) {
             Text(
@@ -729,7 +854,11 @@ internal fun WaiverOrderRow(rank: Int, team: String) {
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(BreakoutDimensions.SmallCornerRadius))
-            .background(if (rank == 1) WaiverAccent.copy(alpha = 0.12f) else BreakoutSurfaceVariant.copy(alpha = 0.52f))
+            .background(
+                if (rank == 1) WaiverAccent.copy(alpha = 0.12f) else BreakoutSurfaceVariant.copy(
+                    alpha = 0.52f
+                )
+            )
             .border(
                 1.dp,
                 if (rank == 1) WaiverAccent.copy(alpha = 0.34f) else BreakoutOutline.copy(alpha = 0.28f),
@@ -739,8 +868,18 @@ internal fun WaiverOrderRow(rank: Int, team: String) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text("#$rank", color = if (rank == 1) WaiverAccent else BreakoutSecondary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        Text(team, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(
+            "#$rank",
+            color = if (rank == 1) WaiverAccent else BreakoutSecondary,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            team,
+            style = MaterialTheme.typography.labelLarge,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
@@ -773,8 +912,18 @@ internal fun WaiverResultRow(result: WaiverResultUi) {
                 maxLines = 1
             )
             Column(modifier = Modifier.weight(1f)) {
-                Text(result.artistName, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(result.detail, color = BreakoutTextSecondary, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    result.artistName,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    result.detail,
+                    color = BreakoutTextSecondary,
+                    style = MaterialTheme.typography.bodySmall
+                )
             }
         }
     }

@@ -30,6 +30,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -188,6 +189,7 @@ import kotlin.math.max
 import kotlin.random.Random
 
 internal val LocalNavigationRefreshTick = staticCompositionLocalOf { 0 }
+internal val LocalEncoreMode = staticCompositionLocalOf { false }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -220,7 +222,7 @@ internal fun ScreenColumn(
     LaunchedEffect(navigationRefreshTick) {
         if (navigationRefreshTick > 0) {
             focusManager.clearFocus()
-            listState.animateScrollToItem(0)
+            listState.smoothScreenScrollToTop()
         }
     }
 
@@ -314,6 +316,21 @@ internal fun ScreenColumn(
                 )
             }
         }
+    }
+}
+
+private suspend fun LazyListState.smoothScreenScrollToTop() {
+    repeat(220) {
+        if (firstVisibleItemIndex == 0 && firstVisibleItemScrollOffset == 0) return
+        val viewportHeight = layoutInfo.viewportSize.height.toFloat().coerceAtLeast(360f)
+        val moved = scrollBy(-viewportHeight * 0.10f)
+        if (moved == 0f && firstVisibleItemIndex > 0) {
+            animateScrollToItem((firstVisibleItemIndex - 1).coerceAtLeast(0))
+        }
+        delay(18)
+    }
+    if (firstVisibleItemIndex != 0 || firstVisibleItemScrollOffset != 0) {
+        animateScrollToItem(0)
     }
 }
 
@@ -964,7 +981,8 @@ internal fun ScreenHero(
     title: String,
     subtitle: String,
     stats: List<Triple<String, String, String>> = emptyList(),
-    accent: Color = BreakoutPrimary
+    accent: Color = BreakoutPrimary,
+    onStatTap: (String) -> Unit = {}
 ) {
     BreakoutCard(
         contentPadding = PaddingValues(BreakoutDimensions.HeroCardPadding),
@@ -996,7 +1014,15 @@ internal fun ScreenHero(
                 stats.chunked(2).forEach { rowStats ->
                     Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.CardSpacing)) {
                         rowStats.forEach { (label, value, detail) ->
-                            StatTile(label, value, detail, Modifier.weight(1f))
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .pointerInput(label) {
+                                        detectTapGestures { onStatTap(label) }
+                                    }
+                            ) {
+                                StatTile(label, value, detail, Modifier.fillMaxWidth())
+                            }
                         }
                         if (rowStats.size == 1) {
                             Spacer(modifier = Modifier.weight(1f))

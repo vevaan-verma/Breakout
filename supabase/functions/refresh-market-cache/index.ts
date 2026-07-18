@@ -86,6 +86,45 @@ type WeeklyMetric = {
   raw_data: Record<string, unknown>;
 };
 
+type ArtistDailySnapshot = {
+  normalized_name: string;
+  name: string;
+  snapshot_date: string;
+  listeners: number | null;
+  source: string | null;
+  raw_data: Record<string, unknown>;
+  updated_at: string;
+};
+
+type ArtistProjectionFreeze = {
+  normalized_name: string;
+  name: string;
+  week_start: string;
+  projected_points: number;
+  formula_version: string;
+  listeners: number | null;
+  role: string;
+  source: string | null;
+  raw_data: Record<string, unknown>;
+};
+
+type ArtistDailyScore = {
+  normalized_name: string;
+  name: string;
+  week_start: string;
+  score_date: string;
+  actual_points: number;
+  projected_points: number | null;
+  formula_version: string;
+  listeners: number | null;
+  listener_delta: number | null;
+  listener_growth_percent: number | null;
+  role: string;
+  source: string | null;
+  raw_data: Record<string, unknown>;
+  updated_at: string;
+};
+
 type ScoringFormula = {
   audienceWeight: number;
   growthWeight: number;
@@ -201,22 +240,36 @@ Deno.serve(async (request) => {
 
     if (mode === "artwork") {
       const limit = clampInteger(body?.limit, 1, MaxArtworkLimit, DefaultArtworkLimit);
-      const artists = await loadArtistsMissingArtwork(limit);
+      const force = body?.force === true;
+      const beforeStats = await countArtworkBackfillStats();
+      const artists = await loadArtistsMissingArtwork(limit, force);
       if (artists.length > 0) {
         await markArtworkAttempts(artists);
       }
+      const attemptedIconNames = new Set(
+        artists
+          .filter((artist) => !artist.image_url)
+          .map((artist) => artist.normalized_name),
+      );
       const filled = (await parallelMap(artists, 4, fillMissingPastspotArtwork))
-        .filter((artist) => artist.image_url);
+        .filter((artist) => artist.image_url || artist.current_listeners != null);
       if (filled.length > 0) {
         await upsertMarketArtists(filled.map(normalizeMarketArtist));
       }
-      const remainingMissing = await countMissingArtwork();
+      const afterStats = await countArtworkBackfillStats();
       return json({
         mode,
         limit,
+        force,
         attempted: artists.length,
-        found: filled.length,
-        remainingMissing,
+        attemptedMissingIcons: attemptedIconNames.size,
+        found: filled.filter((artist) => artist.image_url && attemptedIconNames.has(artist.normalized_name)).length,
+        updated: filled.length,
+        before: beforeStats,
+        after: afterStats,
+        remainingMissing: afterStats.missingIconsOrCurrentListeners,
+        remainingMissingIcons: afterStats.missingIcons,
+        remainingMissingCurrentListeners: afterStats.missingCurrentListeners,
         durationMs: Date.now() - startedAt,
       });
     }
@@ -233,6 +286,49 @@ Deno.serve(async (request) => {
         artists: artists.length,
         metrics: metrics.length,
         weeks: [...new Set(metrics.map((metric) => metric.week_start))].length,
+        durationMs: Date.now() - startedAt,
+      });
+    }
+
+    if (mode === "freeze-projections" || mode === "score-daily") {
+      const limit = clampInteger(body?.limit, 100, 20_000, 10_000);
+      const formulaVersion = typeof body?.formulaVersion === "string" && body.formulaVersion.trim()
+        ? body.formulaVersion.trim()
+        : "balanced-v1";
+      const formula = scoringFormulaFromBody(body?.formula);
+      const scoreDate = typeof body?.scoreDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.scoreDate)
+        ? body.scoreDate
+        : new Date().toISOString().slice(0, 10);
+      const weekStart = typeof body?.weekStart === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.weekStart)
+        ? body.weekStart
+        : weekStartForDate(scoreDate);
+      const artists = await loadCachedMarketArtistsForMetrics(limit);
+      const metrics = buildWeeklyMetrics(artists);
+      const snapshots = buildDailySnapshots(artists, scoreDate);
+      if (snapshots.length > 0) {
+        await upsertDailySnapshots(snapshots);
+      }
+      const projections = buildProjectionFreezes(metrics, weekStart, formulaVersion, formula);
+      const shouldFreeze = mode === "freeze-projections" || body?.freezeMissingProjections === true;
+      if (shouldFreeze && projections.length > 0) {
+        await upsertProjectionFreezes(projections);
+      }
+      const projectionMap = shouldFreeze
+        ? new Map(projections.map((projection) => [projection.normalized_name, projection.projected_points]))
+        : await loadProjectionMap(weekStart, formulaVersion);
+      const scores = buildDailyScores(metrics, weekStart, scoreDate, formulaVersion, formula, projectionMap);
+      if (mode === "score-daily" && scores.length > 0) {
+        await upsertDailyScores(scores);
+      }
+      return json({
+        mode,
+        formulaVersion,
+        scoreDate,
+        weekStart,
+        artists: artists.length,
+        snapshots: snapshots.length,
+        projections: shouldFreeze ? projections.length : projectionMap.size,
+        scores: mode === "score-daily" ? scores.length : 0,
         durationMs: Date.now() - startedAt,
       });
     }
@@ -363,9 +459,58 @@ async function markArtworkAttempts(artists: MarketArtist[]): Promise<void> {
   if (!response.ok) throw new Error(await response.text());
 }
 
-async function countMissingArtwork(): Promise<number> {
+type ArtworkBackfillStats = {
+  missingIcons: number;
+  missingCurrentListeners: number;
+  missingIconsOrCurrentListeners: number;
+  eligibleNow: number;
+  waitingForRetryWindow: number;
+  exhaustedAttempts: number;
+};
+
+async function countArtworkBackfillStats(): Promise<ArtworkBackfillStats> {
+  const retryBefore = new Date(Date.now() - ArtworkRetryDelayHours * 60 * 60 * 1000).toISOString();
+  const [
+    missingIcons,
+    missingCurrentListeners,
+    missingIconsOrCurrentListeners,
+    eligibleNow,
+    waitingForRetryWindow,
+    exhaustedAttempts,
+  ] = await Promise.all([
+    countMarketRows({ image_url: "is.null" }),
+    countMarketRows({ current_listeners: "is.null" }),
+    countMarketRows({ or: "(image_url.is.null,current_listeners.is.null)" }),
+    countMarketRows({
+      and: `(or(image_url.is.null,current_listeners.is.null),or(artwork_last_attempted_at.is.null,artwork_last_attempted_at.lt.${retryBefore}))`,
+      artwork_attempt_count: `lt.${MaxArtworkAttempts}`,
+    }),
+    countMarketRows({
+      and: `(or(image_url.is.null,current_listeners.is.null),artwork_last_attempted_at.gte.${retryBefore})`,
+      artwork_attempt_count: `lt.${MaxArtworkAttempts}`,
+    }),
+    countMarketRows({
+      or: "(image_url.is.null,current_listeners.is.null)",
+      artwork_attempt_count: `gte.${MaxArtworkAttempts}`,
+    }),
+  ]);
+  return {
+    missingIcons,
+    missingCurrentListeners,
+    missingIconsOrCurrentListeners,
+    eligibleNow,
+    waitingForRetryWindow,
+    exhaustedAttempts,
+  };
+}
+
+async function countMarketRows(filters: Record<string, string>): Promise<number> {
+  const query = new URLSearchParams({
+    select: "normalized_name",
+    ...filters,
+  });
   const response = await fetch(
-    `${SUPABASE_URL}/rest/v1/market_artist_cache?select=normalized_name&or=(image_url.is.null,current_listeners.is.null)`,
+    `${SUPABASE_URL}/rest/v1/market_artist_cache?${query}`,
     {
       signal: AbortSignal.timeout(FetchTimeoutMs),
       headers: {
@@ -384,14 +529,37 @@ async function countMissingArtwork(): Promise<number> {
   return Number.isFinite(total) ? total : 0;
 }
 
-async function loadArtistsMissingArtwork(limit: number): Promise<MarketArtist[]> {
+async function loadArtistsMissingArtwork(limit: number, force = false): Promise<MarketArtist[]> {
+  const iconRows = await loadMissingArtworkRows(limit, force, true);
+  if (iconRows.length >= limit) return iconRows;
+  const currentRows = await loadMissingArtworkRows(limit - iconRows.length, force, false);
+  const seen = new Set(iconRows.map((artist) => artist.normalized_name));
+  return [
+    ...iconRows,
+    ...currentRows.filter((artist) => !seen.has(artist.normalized_name)),
+  ].slice(0, limit);
+}
+
+async function loadMissingArtworkRows(limit: number, force: boolean, iconsOnly: boolean): Promise<MarketArtist[]> {
   const retryBefore = new Date(Date.now() - ArtworkRetryDelayHours * 60 * 60 * 1000).toISOString();
-  const query = new URLSearchParams({
-    select: MarketArtistSelectWithAttempts,
-    and: `(or(image_url.is.null,current_listeners.is.null),or(artwork_last_attempted_at.is.null,artwork_last_attempted_at.lt.${retryBefore}))`,
-    artwork_attempt_count: `lt.${MaxArtworkAttempts}`,
-    order: "artwork_last_attempted_at.asc.nullsfirst,artwork_attempt_count.asc,listeners.desc.nullslast",
-  });
+  const missingFilter = iconsOnly
+    ? { image_url: "is.null" }
+    : { image_url: "not.is.null", current_listeners: "is.null" };
+  const query = new URLSearchParams(
+    force
+      ? {
+          select: MarketArtistSelectWithAttempts,
+          ...missingFilter,
+          order: "artwork_attempt_count.asc,artwork_last_attempted_at.asc.nullsfirst,listeners.desc.nullslast",
+        }
+      : {
+          select: MarketArtistSelectWithAttempts,
+          ...missingFilter,
+          or: `(artwork_last_attempted_at.is.null,artwork_last_attempted_at.lt.${retryBefore})`,
+          artwork_attempt_count: `lt.${MaxArtworkAttempts}`,
+          order: "artwork_last_attempted_at.asc.nullsfirst,artwork_attempt_count.asc,listeners.desc.nullslast",
+        },
+  );
   const response = await fetch(
     `${SUPABASE_URL}/rest/v1/market_artist_cache?${query}`,
     {
@@ -535,6 +703,174 @@ async function upsertWeeklyMetrics(metrics: WeeklyMetric[]): Promise<void> {
     });
     if (!response.ok) throw new Error(await response.text());
   }
+}
+
+function buildDailySnapshots(artists: MarketArtist[], scoreDate: string): ArtistDailySnapshot[] {
+  return artists
+    .filter((artist) => artist.normalized_name && artist.name)
+    .map((artist) => ({
+      normalized_name: artist.normalized_name,
+      name: artist.name,
+      snapshot_date: scoreDate,
+      listeners: artist.current_listeners ?? artist.snapshot_listeners ?? artist.listeners ?? null,
+      source: artist.current_listeners_source ?? artist.source ?? null,
+      raw_data: {
+        current_listeners_observed_at: artist.current_listeners_observed_at ?? null,
+        snapshot_date: artist.snapshot_date ?? null,
+        data_date: artist.data_date ?? null,
+        weekly_listener_gain: artist.weekly_listener_gain ?? null,
+        weekly_listener_growth_percent: artist.weekly_listener_growth_percent ?? null,
+      },
+      updated_at: new Date().toISOString(),
+    }));
+}
+
+function buildProjectionFreezes(
+  metrics: WeeklyMetric[],
+  weekStart: string,
+  formulaVersion: string,
+  formula: ScoringFormula,
+): ArtistProjectionFreeze[] {
+  return latestMetricByArtist(metrics).map((metric) => ({
+    normalized_name: metric.normalized_name,
+    name: metric.name,
+    week_start: weekStart,
+    projected_points: roundOne(scoreWeeklyMetric(metric, formula)),
+    formula_version: formulaVersion,
+    listeners: metric.listeners,
+    role: metric.role,
+    source: metric.source ?? null,
+    raw_data: {
+      projected_from_week_start: metric.week_start,
+      weekly_listener_gain: metric.weekly_listener_gain,
+      weekly_listener_growth_percent: metric.weekly_listener_growth_percent,
+      snapshot_date: metric.snapshot_date ?? null,
+    },
+  }));
+}
+
+function buildDailyScores(
+  metrics: WeeklyMetric[],
+  weekStart: string,
+  scoreDate: string,
+  formulaVersion: string,
+  formula: ScoringFormula,
+  projectionMap: Map<string, number>,
+): ArtistDailyScore[] {
+  return latestMetricByArtist(metrics).map((metric) => {
+    const listeners = metric.listeners ?? metric.snapshot_listeners ?? null;
+    const baseline = metric.previous_snapshot_listeners ?? (
+      listeners != null && metric.weekly_listener_gain != null ? listeners - metric.weekly_listener_gain : null
+    );
+    const delta = listeners != null && baseline != null ? listeners - baseline : metric.weekly_listener_gain ?? null;
+    const growth = baseline != null && baseline > 0 && delta != null ? (delta / baseline) * 100 : metric.weekly_listener_growth_percent ?? null;
+    const liveMetric: WeeklyMetric = {
+      ...metric,
+      week_start: weekStart,
+      listeners,
+      weekly_listener_gain: delta,
+      weekly_listener_growth_percent: growth,
+      daily_listener_change: delta == null ? metric.daily_listener_change : Math.round(delta / 7),
+    };
+    return {
+      normalized_name: metric.normalized_name,
+      name: metric.name,
+      week_start: weekStart,
+      score_date: scoreDate,
+      actual_points: roundOne(scoreWeeklyMetric(liveMetric, formula)),
+      projected_points: projectionMap.get(metric.normalized_name) ?? null,
+      formula_version: formulaVersion,
+      listeners,
+      listener_delta: delta,
+      listener_growth_percent: growth == null ? null : roundOne(growth),
+      role: metric.role,
+      source: metric.source ?? null,
+      raw_data: {
+        source_week_start: metric.week_start,
+        source_snapshot_date: metric.snapshot_date ?? null,
+        projected_points: projectionMap.get(metric.normalized_name) ?? null,
+      },
+      updated_at: new Date().toISOString(),
+    };
+  });
+}
+
+function latestMetricByArtist(metrics: WeeklyMetric[]): WeeklyMetric[] {
+  const byName = new Map<string, WeeklyMetric>();
+  for (const metric of metrics) {
+    const current = byName.get(metric.normalized_name);
+    if (!current || metric.week_start >= current.week_start) {
+      byName.set(metric.normalized_name, metric);
+    }
+  }
+  return [...byName.values()].filter((metric) => metric.listeners != null);
+}
+
+async function upsertDailySnapshots(rows: ArtistDailySnapshot[]): Promise<void> {
+  for (const batch of chunkArray(rows, BatchSize)) {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/artist_daily_listener_snapshots?on_conflict=normalized_name,snapshot_date`, {
+      method: "POST",
+      signal: AbortSignal.timeout(FetchTimeoutMs),
+      headers: {
+        "apikey": SERVICE_ROLE_KEY,
+        "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates",
+      },
+      body: JSON.stringify(batch),
+    });
+    if (!response.ok) throw new Error(await response.text());
+  }
+}
+
+async function upsertProjectionFreezes(rows: ArtistProjectionFreeze[]): Promise<void> {
+  for (const batch of chunkArray(rows, BatchSize)) {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/artist_weekly_projection_freezes?on_conflict=normalized_name,week_start,formula_version`, {
+      method: "POST",
+      signal: AbortSignal.timeout(FetchTimeoutMs),
+      headers: {
+        "apikey": SERVICE_ROLE_KEY,
+        "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
+        "Content-Type": "application/json",
+        "Prefer": "resolution=ignore-duplicates",
+      },
+      body: JSON.stringify(batch),
+    });
+    if (!response.ok) throw new Error(await response.text());
+  }
+}
+
+async function upsertDailyScores(rows: ArtistDailyScore[]): Promise<void> {
+  for (const batch of chunkArray(rows, BatchSize)) {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/artist_daily_scores?on_conflict=normalized_name,week_start,score_date,formula_version`, {
+      method: "POST",
+      signal: AbortSignal.timeout(FetchTimeoutMs),
+      headers: {
+        "apikey": SERVICE_ROLE_KEY,
+        "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates",
+      },
+      body: JSON.stringify(batch),
+    });
+    if (!response.ok) throw new Error(await response.text());
+  }
+}
+
+async function loadProjectionMap(weekStart: string, formulaVersion: string): Promise<Map<string, number>> {
+  const response = await fetch(
+    `${SUPABASE_URL}/rest/v1/artist_weekly_projection_freezes?select=normalized_name,projected_points&week_start=eq.${weekStart}&formula_version=eq.${encodeURIComponent(formulaVersion)}&limit=20000`,
+    {
+      signal: AbortSignal.timeout(FetchTimeoutMs),
+      headers: {
+        "apikey": SERVICE_ROLE_KEY,
+        "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
+      },
+    },
+  );
+  if (!response.ok) return new Map();
+  const rows: Array<{ normalized_name: string; projected_points: number }> = await response.json().catch(() => []);
+  return new Map(rows.map((row) => [row.normalized_name, Number(row.projected_points)]));
 }
 
 async function loadWeeklyMetricsForBacktest(weeks: number): Promise<WeeklyMetric[]> {
@@ -1274,6 +1610,10 @@ function weekStartIso(value: string): string {
   date.setUTCHours(0, 0, 0, 0);
   date.setUTCDate(date.getUTCDate() - daysSinceMonday);
   return date.toISOString().slice(0, 10);
+}
+
+function weekStartForDate(value: string): string {
+  return weekStartIso(`${value}T00:00:00.000Z`);
 }
 
 function roleForListeners(listeners: number | null): string {

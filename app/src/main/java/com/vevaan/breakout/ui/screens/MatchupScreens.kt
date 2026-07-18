@@ -56,7 +56,6 @@ import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -123,7 +122,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -195,6 +193,7 @@ internal fun MatchupScreen(
     roster: Map<RosterSlot, ArtistUi>,
     draftPicks: List<DraftPickUi>,
     members: List<LeagueMemberUi>?,
+    weekOffset: Int = 0,
     refreshing: Boolean,
     onRefresh: () -> Unit,
     onOpenMenu: () -> Unit,
@@ -214,7 +213,7 @@ internal fun MatchupScreen(
     val selfName = account?.username.orEmpty()
     val loadedMembers = members.orEmpty()
     val scheduleMembers = loadedMembers.mapNotNull { it.username.takeIf { name -> name.isNotBlank() } }
-    val currentWeek = currentLeagueWeek(league)
+    val currentWeek = currentLeagueWeek(league, weekOffset)
     val currentMatchup = matchupForWeek(scheduleMembers, selfName, currentWeek)
     val opponentName = currentMatchup?.opponent ?: "Opponent"
     val opponentRoster = if (opponentName == "Opponent") {
@@ -234,12 +233,16 @@ internal fun MatchupScreen(
             matchupReady = true
         }
     }
-    val userScore = startingRosterEntries.sumOf { (_, artist) -> artist.breakoutScore(null) }
-    val opponentScore = if (league.memberCount > 1) {
-        startingSlots.mapNotNull { opponentRoster[it] }.sumOf { it.breakoutScore(null) }
+    val userProjectedScore = startingRosterEntries.sumOf { (_, artist) -> artist.projectedWeekScore(currentWeek) }
+    val opponentProjectedScore = if (league.memberCount > 1) {
+        startingSlots.mapNotNull { opponentRoster[it] }.sumOf { it.projectedWeekScore(currentWeek) }
     } else null
-    val userCurrentScore = 0.0
-    val opponentCurrentScore = if (league.memberCount > 1) 0.0 else null
+    val userCurrentScore = if (league.draftStatus == DraftStatus.Complete) {
+        startingRosterEntries.sumOf { (_, artist) -> artist.actualWeekScore(currentWeek) }
+    } else 0.0
+    val opponentCurrentScore = if (league.memberCount > 1 && league.draftStatus == DraftStatus.Complete) {
+        startingSlots.mapNotNull { opponentRoster[it] }.sumOf { it.actualWeekScore(currentWeek) }
+    } else null
     if (!matchupReady || waitingForMembers) ScreenColumn(
         refreshing = refreshing,
         onRefresh = onRefresh,
@@ -255,8 +258,8 @@ internal fun MatchupScreen(
             opponentName = opponentName,
             currentHasBye = currentHasBye,
             currentWeek = currentWeek,
-            userProjected = userScore,
-            opponentProjected = opponentScore,
+            userProjected = userProjectedScore,
+            opponentProjected = opponentProjectedScore,
             userCurrent = userCurrentScore,
             opponentCurrent = opponentCurrentScore
         )
@@ -280,6 +283,7 @@ internal fun MatchupScreen(
                     onOpenUserSlot = { targetSlot ->
                         onOpenMarket(if (targetSlot.isBenchSlot()) MarketFilter.Trending else targetSlot.filter)
                     },
+                    week = currentWeek,
                     onArtistSelected = onArtistSelected
                 )
             }
@@ -293,6 +297,7 @@ internal fun MatchupScreen(
                         onOpenUserSlot = { targetSlot ->
                             onOpenMarket(if (targetSlot.isBenchSlot()) MarketFilter.Trending else targetSlot.filter)
                         },
+                        week = currentWeek,
                         onArtistSelected = onArtistSelected
                     )
                 }
@@ -327,9 +332,11 @@ internal fun MatchupScreen(
 @Composable
 internal fun AllMatchupsScreen(
     league: LeagueUi,
+    currentUsername: String = "",
     members: List<LeagueMemberUi>?,
     draftPicks: List<DraftPickUi>,
     initialWeek: Int,
+    weekOffset: Int = 0,
     refreshing: Boolean,
     onRefresh: () -> Unit,
     onOpenMenu: () -> Unit,
@@ -340,12 +347,18 @@ internal fun AllMatchupsScreen(
         .filter { it.isNotBlank() }
         .distinctBy { it.lowercase() }
     val weekCount = league.settings.seasonWeeks.coerceAtLeast(1)
-    var selectedWeek by rememberSaveable(league.id) { mutableStateOf(initialWeek.coerceIn(1, weekCount)) }
+    val simulatedInitialWeek = initialWeek.coerceIn(1, weekCount)
+    val scoredThroughWeek = currentLeagueWeek(league, weekOffset)
+    var selectedWeek by rememberSaveable(league.id) { mutableStateOf(simulatedInitialWeek) }
     var weekDirection by remember { mutableStateOf(1) }
-    LaunchedEffect(initialWeek, weekCount) {
-        selectedWeek = initialWeek.coerceIn(1, weekCount)
+    var selectedPairIndex by rememberSaveable(league.id) { mutableStateOf(0) }
+    LaunchedEffect(simulatedInitialWeek, weekCount) {
+        selectedWeek = simulatedInitialWeek
     }
     val pairs = matchupPairsForWeek(memberNames, selectedWeek)
+    LaunchedEffect(selectedWeek, pairs.size) {
+        selectedPairIndex = selectedPairIndex.coerceIn(0, (pairs.size - 1).coerceAtLeast(0))
+    }
     ScreenColumn(
         refreshing = refreshing,
         onRefresh = onRefresh,
@@ -397,13 +410,65 @@ internal fun AllMatchupsScreen(
                 },
                 label = "allMatchupsWeek"
             ) { week ->
-                Column(verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.CardSpacing)) {
-                    matchupPairsForWeek(memberNames, week).forEach { pair ->
+                val orderedPairs = matchupPairsForWeek(memberNames, week)
+                        .sortedBy { pair ->
+                            val isUserMatchup = pair.first.equals(currentUsername, ignoreCase = true) ||
+                                pair.second?.equals(currentUsername, ignoreCase = true) == true
+                            if (isUserMatchup) 0 else 1
+                        }
+                val pairCount = orderedPairs.size
+                val pairIndex = selectedPairIndex.coerceIn(0, (pairCount - 1).coerceAtLeast(0))
+                Column(verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)) {
+                    if (pairCount > 1) {
+                        BreakoutCard(contentPadding = PaddingValues(BreakoutDimensions.md)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RosterActionIcon(
+                                    text = "<",
+                                    accent = BreakoutPrimary,
+                                    onClick = {
+                                        selectedPairIndex = if (pairIndex == 0) pairCount - 1 else pairIndex - 1
+                                    }
+                                )
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(
+                                        "Matchup ${pairIndex + 1} of $pairCount",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Black
+                                    )
+                                    Text(
+                                        orderedPairs.getOrNull(pairIndex)?.let { pair ->
+                                            "${pair.first.displayMemberName(currentUsername)} vs ${(pair.second ?: "Bye").displayMemberName(currentUsername)}"
+                                        }.orEmpty(),
+                                        color = BreakoutTextSecondary,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                RosterActionIcon(
+                                    text = ">",
+                                    accent = BreakoutPrimary,
+                                    onClick = {
+                                        selectedPairIndex = if (pairIndex >= pairCount - 1) 0 else pairIndex + 1
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    orderedPairs.getOrNull(pairIndex)?.let { pair ->
                         AllMatchupCard(
+                            modifier = Modifier.fillMaxWidth(),
                             leftName = pair.first,
                             rightName = pair.second,
+                            currentUsername = currentUsername,
                             league = league,
                             draftPicks = draftPicks,
+                            week = week,
+                            scoredThroughWeek = scoredThroughWeek,
                             onArtistSelected = onArtistSelected
                         )
                     }
@@ -415,10 +480,14 @@ internal fun AllMatchupsScreen(
 
 @Composable
 internal fun AllMatchupCard(
+    modifier: Modifier = Modifier,
     leftName: String,
     rightName: String?,
+    currentUsername: String,
     league: LeagueUi,
     draftPicks: List<DraftPickUi>,
+    week: Int,
+    scoredThroughWeek: Int,
     onArtistSelected: (ArtistUi) -> Unit
 ) {
     val slots = activeRosterSlots(league.settings)
@@ -426,19 +495,28 @@ internal fun AllMatchupCard(
     val benchSlots = slots.filter { it.isBenchSlot() }
     val leftRoster = rosterForMemberName(leftName, draftPicks)
     val rightRoster = rightName?.let { rosterForMemberName(it, draftPicks) }.orEmpty()
-    val leftScore = startingSlots.mapNotNull { leftRoster[it] }.sumOf { it.breakoutScore(null) }
-    val rightScore = rightName?.let { startingSlots.mapNotNull { rightRoster[it] }.sumOf { artist -> artist.breakoutScore(null) } }
-    BreakoutCard(contentPadding = PaddingValues(BreakoutDimensions.HeroCardPadding)) {
+    val currentScoresAvailable = league.draftStatus == DraftStatus.Complete && week <= scoredThroughWeek
+    val projectedScoresAvailable = week <= scoredThroughWeek
+    val leftCurrentScore = if (currentScoresAvailable) startingSlots.mapNotNull { leftRoster[it] }.sumOf { it.actualWeekScore(week) } else null
+    val rightCurrentScore = if (currentScoresAvailable) rightName?.let { startingSlots.mapNotNull { rightRoster[it] }.sumOf { artist -> artist.actualWeekScore(week) } } else null
+    val leftProjectedScore = if (projectedScoresAvailable) startingSlots.mapNotNull { leftRoster[it] }.sumOf { it.projectedWeekScore(week) } else null
+    val rightProjectedScore = if (projectedScoresAvailable) rightName?.let { startingSlots.mapNotNull { rightRoster[it] }.sumOf { artist -> artist.projectedWeekScore(week) } } else null
+    val leftDisplayName = leftName.displayMemberName(currentUsername)
+    val rightDisplayName = (rightName ?: "Bye").displayMemberName(currentUsername)
+    BreakoutCard(modifier = modifier, contentPadding = PaddingValues(BreakoutDimensions.HeroCardPadding)) {
         Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.CardSpacing), verticalAlignment = Alignment.CenterVertically) {
-            MatchupScoreSide(leftName, "--", leftScore.formatPoints(), Modifier.weight(1f), alignEnd = false)
+            MatchupScoreSide(leftDisplayName, leftCurrentScore?.formatPoints() ?: "--", leftProjectedScore?.formatPoints() ?: "--", Modifier.weight(1f), alignEnd = false)
             Text("VS", color = BreakoutPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
-            MatchupScoreSide(rightName ?: "Bye", "--", rightScore?.formatPoints() ?: "--", Modifier.weight(1f), alignEnd = true)
+            MatchupScoreSide(rightDisplayName, rightCurrentScore?.formatPoints() ?: "--", rightProjectedScore?.formatPoints() ?: "--", Modifier.weight(1f), alignEnd = true)
         }
         startingSlots.forEach { slot ->
             MatchupSlotComparisonRow(
                 slot = slot,
                 userArtist = leftRoster[slot],
                 opponentArtist = rightRoster[slot],
+                week = week,
+                currentScoresAvailable = currentScoresAvailable,
+                projectedScoresAvailable = projectedScoresAvailable,
                 onArtistSelected = onArtistSelected
             )
         }
@@ -449,6 +527,9 @@ internal fun AllMatchupCard(
                     slot = slot,
                     userArtist = leftRoster[slot],
                     opponentArtist = rightRoster[slot],
+                    week = week,
+                    currentScoresAvailable = currentScoresAvailable,
+                    projectedScoresAvailable = projectedScoresAvailable,
                     onArtistSelected = onArtistSelected
                 )
             }
@@ -604,6 +685,9 @@ internal fun MatchupSlotComparisonRow(
     slot: RosterSlot,
     userArtist: ArtistUi?,
     opponentArtist: ArtistUi?,
+    week: Int,
+    currentScoresAvailable: Boolean = true,
+    projectedScoresAvailable: Boolean = true,
     onOpenUserSlot: (RosterSlot) -> Unit = {},
     onArtistSelected: (ArtistUi) -> Unit
 ) {
@@ -617,20 +701,35 @@ internal fun MatchupSlotComparisonRow(
             )
             Text(slot.label, color = BreakoutTextSecondary, style = MaterialTheme.typography.labelMedium)
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.xs),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             MatchupSideCell(
                 slot = slot,
                 artist = userArtist,
-                alignEnd = false,
+                week = week,
+                currentScoresAvailable = currentScoresAvailable,
+                projectedScoresAvailable = projectedScoresAvailable,
+                isRightSide = false,
                 onOpenSlot = { onOpenUserSlot(slot) },
                 onArtistSelected = onArtistSelected,
                 modifier = Modifier.weight(1f)
             )
-            Text(":", color = BreakoutOutline, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
+            Box(
+                modifier = Modifier.width(10.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(":", color = BreakoutOutline.copy(alpha = 0.70f), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Black)
+            }
             MatchupSideCell(
                 slot = slot,
                 artist = opponentArtist,
-                alignEnd = true,
+                week = week,
+                currentScoresAvailable = currentScoresAvailable,
+                projectedScoresAvailable = projectedScoresAvailable,
+                isRightSide = true,
                 onOpenSlot = null,
                 onArtistSelected = onArtistSelected,
                 modifier = Modifier.weight(1f)
@@ -643,14 +742,21 @@ internal fun MatchupSlotComparisonRow(
 internal fun MatchupSideCell(
     slot: RosterSlot,
     artist: ArtistUi?,
-    alignEnd: Boolean,
+    week: Int,
+    currentScoresAvailable: Boolean = true,
+    projectedScoresAvailable: Boolean = true,
+    isRightSide: Boolean = false,
     onOpenSlot: (() -> Unit)?,
     onArtistSelected: (ArtistUi) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val isOpen = artist == null
+    val currentScore = if (currentScoresAvailable) artist?.actualWeekScore(week) else null
+    val projectedScore = if (projectedScoresAvailable) artist?.projectedWeekScore(week) else null
     val borderColor = if (isOpen) BreakoutOutline.copy(alpha = 0.34f) else BreakoutPrimary.copy(alpha = 0.38f)
     val backgroundColor = if (isOpen) BreakoutSurfaceVariant.copy(alpha = 0.34f) else BreakoutPrimary.copy(alpha = 0.10f)
+    val sideAlignment = if (isRightSide) Alignment.End else Alignment.Start
+    val nameAlign = if (isRightSide) TextAlign.End else TextAlign.Start
     Column(
         modifier = modifier
             .clip(RoundedCornerShape(BreakoutDimensions.SmallCornerRadius))
@@ -663,34 +769,78 @@ internal fun MatchupSideCell(
                     else -> Modifier
                 }
             )
-            .heightIn(min = 82.dp)
-            .padding(horizontal = BreakoutDimensions.md, vertical = BreakoutDimensions.sm),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = if (alignEnd) Alignment.End else Alignment.Start
+            .heightIn(min = 104.dp)
+            .padding(horizontal = BreakoutDimensions.sm, vertical = BreakoutDimensions.sm),
+        verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.xs, Alignment.CenterVertically),
+        horizontalAlignment = sideAlignment
     ) {
         Text(
-            artist?.name ?: "Open",
+            artist?.displayName() ?: "Open",
             style = MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.Bold,
             color = if (isOpen) BreakoutTextSecondary else Color.White,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            textAlign = if (alignEnd) TextAlign.End else TextAlign.Start
+            modifier = Modifier.fillMaxWidth(),
+            textAlign = nameAlign
         )
+        if (isOpen) {
+            Text(
+                "Needs artist",
+                color = BreakoutTextSecondary.copy(alpha = 0.75f),
+                style = MaterialTheme.typography.labelMedium,
+                textAlign = nameAlign,
+                modifier = Modifier.fillMaxWidth()
+            )
+        } else {
+            MatchupMetricLine(
+                label = "Current",
+                value = currentScore?.formatPoints() ?: "--",
+                alignEnd = !isRightSide,
+                primary = true
+            )
+            MatchupMetricLine(
+                label = "Projected",
+                value = projectedScore?.formatPoints() ?: "--",
+                alignEnd = isRightSide,
+                primary = false
+            )
+        }
+    }
+}
+
+@Composable
+private fun MatchupMetricLine(
+    label: String,
+    value: String,
+    alignEnd: Boolean,
+    primary: Boolean
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = if (alignEnd) Arrangement.End else Arrangement.Start,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
         Text(
-            if (isOpen) "Unfilled slot" else "Proj. ${artist?.breakoutScore(null)?.formatScore() ?: "--"}",
-            color = if (isOpen) BreakoutTextSecondary.copy(alpha = 0.75f) else BreakoutTextSecondary,
-            style = MaterialTheme.typography.labelSmall,
+            "$label ",
+            color = BreakoutTextSecondary,
+            style = if (primary) MaterialTheme.typography.titleSmall else MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold,
             maxLines = 1
         )
         Text(
-            if (isOpen) "Needs artist" else "Current --",
-            color = if (isOpen) BreakoutTextSecondary.copy(alpha = 0.75f) else BreakoutTextSecondary,
-            style = MaterialTheme.typography.labelSmall,
-            maxLines = 1
+            value,
+            color = if (primary) BreakoutPrimary else BreakoutTextSecondary,
+            style = if (primary) MaterialTheme.typography.titleSmall else MaterialTheme.typography.labelMedium,
+            fontWeight = if (primary) FontWeight.Black else FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
     }
 }
+
+internal fun String.displayMemberName(currentUsername: String): String =
+    if (equals(currentUsername, ignoreCase = true)) "You" else this
 
 @Composable
 internal fun MatchupArtistRow(slot: RosterSlot, artist: ArtistUi, onClick: () -> Unit) {
@@ -705,7 +855,7 @@ internal fun MatchupArtistRow(slot: RosterSlot, artist: ArtistUi, onClick: () ->
     ) {
         ArtistArtwork(artist = artist, size = BreakoutDimensions.ArtworkList)
         Column(modifier = Modifier.weight(1f)) {
-            Text(artist.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(artist.displayName(), style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(slot.label, color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium)
         }
         Column(horizontalAlignment = Alignment.End) {

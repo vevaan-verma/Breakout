@@ -189,10 +189,67 @@ import kotlin.random.Random
 @Composable
 internal fun StandingsScreen(
     league: LeagueUi,
+    currentUsername: String = "",
+    members: List<LeagueMemberUi> = emptyList(),
+    draftPicks: List<DraftPickUi> = emptyList(),
+    weekOffset: Int = 0,
     refreshing: Boolean,
     onRefresh: () -> Unit,
     onOpenMenu: () -> Unit
 ) {
+    val memberNames = members
+        .map { it.username }
+        .filter { it.isNotBlank() }
+        .distinctBy { it.lowercase() }
+    val currentWeek = currentLeagueWeek(league, weekOffset)
+    val completedWeeks = if (league.draftStatus == DraftStatus.Complete) (currentWeek - 1).coerceAtLeast(0) else 0
+    val startingSlots = activeRosterSlots(league.settings).filterNot { it.isBenchSlot() }
+    val rows = remember(memberNames, draftPicks, completedWeeks, league.settings) {
+        val records = memberNames.associateWith {
+            MutableStandingRow(name = it)
+        }.toMutableMap()
+        (1..completedWeeks).forEach { week ->
+            matchupPairsForWeek(memberNames, week).forEach { pair ->
+                val left = records[pair.first] ?: return@forEach
+                val rightName = pair.second
+                if (rightName == null) {
+                    left.byes += 1
+                    return@forEach
+                }
+                val right = records[rightName] ?: return@forEach
+                val leftScore = draftPicks
+                    .filter { it.pickedBy.equals(pair.first, ignoreCase = true) && it.slot in startingSlots }
+                    .sumOf { it.artist.actualWeekScore(week) }
+                val rightScore = draftPicks
+                    .filter { it.pickedBy.equals(rightName, ignoreCase = true) && it.slot in startingSlots }
+                    .sumOf { it.artist.actualWeekScore(week) }
+                left.pointsFor += leftScore
+                left.pointsAgainst += rightScore
+                right.pointsFor += rightScore
+                right.pointsAgainst += leftScore
+                when {
+                    leftScore > rightScore -> {
+                        left.wins += 1
+                        right.losses += 1
+                    }
+                    rightScore > leftScore -> {
+                        right.wins += 1
+                        left.losses += 1
+                    }
+                    else -> {
+                        left.ties += 1
+                        right.ties += 1
+                    }
+                }
+            }
+        }
+        records.values.sortedWith(
+            compareByDescending<MutableStandingRow> { it.wins }
+                .thenByDescending { it.pointsFor }
+                .thenBy { it.losses }
+                .thenBy { it.name.lowercase() }
+        )
+    }
     ScreenColumn(
         refreshing = refreshing,
         onRefresh = onRefresh,
@@ -211,18 +268,16 @@ internal fun StandingsScreen(
             accent = BreakoutSecondary
         )
         BreakoutCard {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text("Awaiting Week 1", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
-                    Text("Results appear after scoring closes.", color = BreakoutTextSecondary)
-                }
-                NumberBadge("1", BreakoutSecondary)
-            }
-            listOf("Rank" to "--", "Record" to "0-0", "Points For" to "--", "Points Against" to "--").forEach { (label, value) ->
+            Text(
+                if (completedWeeks == 0) "Awaiting Week 1" else "Through Week $completedWeeks",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Black
+            )
+            Text(
+                if (completedWeeks == 0) "Results appear after scoring closes." else "Records include simulated and completed matchups.",
+                color = BreakoutTextSecondary
+            )
+            rows.forEachIndexed { index, row ->
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -232,13 +287,45 @@ internal fun StandingsScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(label, color = BreakoutTextSecondary, style = MaterialTheme.typography.titleSmall)
-                    Text(value, color = BreakoutPrimary, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        NumberBadge((index + 1).toString(), if (row.name.equals(currentUsername, ignoreCase = true)) WaiverAccent else BreakoutSecondary)
+                        Column {
+                            Text(
+                                row.name.displayMemberName(currentUsername),
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Black,
+                                color = if (row.name.equals(currentUsername, ignoreCase = true)) WaiverAccent else Color.White
+                            )
+                            Text(
+                                "${row.wins}-${row.losses}${if (row.ties > 0) "-${row.ties}" else ""}${if (row.byes > 0) " · ${row.byes} bye" else ""}",
+                                color = BreakoutTextSecondary,
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                    }
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(row.pointsFor.formatPoints(), color = BreakoutPrimary, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                        Text("PF", color = BreakoutTextSecondary, style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
         }
     }
 }
+
+private data class MutableStandingRow(
+    val name: String,
+    var wins: Int = 0,
+    var losses: Int = 0,
+    var ties: Int = 0,
+    var byes: Int = 0,
+    var pointsFor: Double = 0.0,
+    var pointsAgainst: Double = 0.0
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -246,10 +333,22 @@ internal fun LeagueScreen(
     league: LeagueUi,
     account: AccountUi?,
     draftPicks: List<DraftPickUi>,
+    localMembers: List<LeagueMemberUi> = emptyList(),
     refreshing: Boolean,
     onRefresh: () -> Unit,
     onOpenMenu: () -> Unit,
     onUpdateLeague: ((LeagueUi) -> LeagueUi) -> Unit,
+    devModeEnabled: Boolean = false,
+    simulatedWeekOffset: Int = 0,
+    maxSimulatedWeekOffset: Int = 0,
+    rostersLocked: Boolean = false,
+    forceRosterUnlocked: Boolean = false,
+    forceRosterLocked: Boolean = false,
+    onSimulateWeeks: (Int) -> Unit = {},
+    onForceRosterUnlockedChange: (Boolean) -> Unit = {},
+    onForceRosterLockedChange: (Boolean) -> Unit = {},
+    onAddBotMembers: (Int) -> Unit = {},
+    onForceMakeManager: () -> Unit = {},
     onTransferManager: (String) -> Unit,
     onKickMember: (String) -> Unit,
     onOpenRoster: () -> Unit,
@@ -272,6 +371,12 @@ internal fun LeagueScreen(
     var pendingTransfer by remember { mutableStateOf<LeagueMemberUi?>(null) }
     var pendingKick by remember { mutableStateOf<LeagueMemberUi?>(null) }
     var confirmRunWaivers by rememberSaveable(league.inviteCode) { mutableStateOf(false) }
+    var simulationWeeks by rememberSaveable(league.id, maxSimulatedWeekOffset, simulatedWeekOffset) { mutableStateOf(0) }
+    var botCountToAdd by rememberSaveable(league.id, league.memberCount, league.maxMembers) { mutableStateOf(0) }
+    var confirmSimulation by rememberSaveable(league.id) { mutableStateOf(false) }
+    var confirmRosterLockChange by rememberSaveable(league.id) { mutableStateOf(false) }
+    var confirmAddBots by rememberSaveable(league.id) { mutableStateOf(false) }
+    var confirmForceManager by rememberSaveable(league.id) { mutableStateOf(false) }
     var confirmLeave by rememberSaveable(league.inviteCode) { mutableStateOf(false) }
     var confirmDeleteLeague by rememberSaveable(league.inviteCode) { mutableStateOf(false) }
     var draftDateInput by rememberSaveable(league.id, settings.draftDateLabel) {
@@ -296,7 +401,14 @@ internal fun LeagueScreen(
         "You will lose access to this league."
     }
     val scheduleWarnings = matchupScheduleWarnings(league.memberCount, settings.seasonWeeks)
-    val visibleMembers = members.ifEmpty {
+    val currentWeek = currentLeagueWeek(league, simulatedWeekOffset)
+    val invitesLockedByDraft = league.draftStatus != DraftStatus.Scheduled
+    val minSimulationDelta = -simulatedWeekOffset
+    val targetSimulationWeek = (currentWeek + simulationWeeks).coerceIn(1, settings.seasonWeeks.coerceAtLeast(1))
+    val mergedMembers = (localMembers + members)
+        .distinctBy { it.username.lowercase() }
+    val availableBotSlots = (league.maxMembers - mergedMembers.size).coerceAtLeast(0)
+    val visibleMembers = mergedMembers.ifEmpty {
         listOf(
             LeagueMemberUi(
                 username = accountMemberName,
@@ -320,7 +432,8 @@ internal fun LeagueScreen(
         } else {
             members
         }
-        loadedMembers.firstOrNull { it.username.equals(username, ignoreCase = true) }?.let {
+        (loadedMembers + localMembers).distinctBy { it.username.lowercase() }
+            .firstOrNull { it.username.equals(username, ignoreCase = true) }?.let {
             rosterMember = it
             onMemberRosterOpened()
         }
@@ -331,6 +444,14 @@ internal fun LeagueScreen(
             delay(3000)
             draftTimeSaved = false
         }
+    }
+
+    LaunchedEffect(maxSimulatedWeekOffset) {
+        simulationWeeks = simulationWeeks.coerceIn(minSimulationDelta, maxSimulatedWeekOffset)
+    }
+
+    LaunchedEffect(availableBotSlots) {
+        botCountToAdd = botCountToAdd.coerceIn(0, availableBotSlots.coerceAtLeast(0))
     }
 
     ScreenColumn(
@@ -380,7 +501,7 @@ internal fun LeagueScreen(
                 )
             }
             ScoreLine("Invite Code", league.inviteCode)
-            ScoreLine("Invites", league.inviteState)
+            ScoreLine("Invites", if (invitesLockedByDraft) "Closed for draft" else league.inviteState)
             StepperRow(
                 label = "Max Members",
                 value = league.maxMembers.toString(),
@@ -575,6 +696,131 @@ internal fun LeagueScreen(
                 )
             }
         }
+        AnimatedVisibility(
+            visible = devModeEnabled,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically()
+        ) {
+            BreakoutCard {
+                Text("Developer League Tools", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                Text(
+                    "Test scoring weeks and roster lock behavior for this league.",
+                    color = BreakoutTextSecondary,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                ScoreLine("Live View", if (simulatedWeekOffset == 0) "Live week $currentWeek" else "Simulated week $currentWeek")
+                ScoreLine(
+                    "Simulation Target",
+                    if (simulationWeeks == 0) "No week jump" else "Move to Week $targetSimulationWeek"
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm), verticalAlignment = Alignment.CenterVertically) {
+                    SecondaryButton(
+                        text = "-",
+                        modifier = Modifier.weight(1f),
+                        enabled = simulationWeeks > minSimulationDelta,
+                        onClick = { simulationWeeks = (simulationWeeks - 1).coerceAtLeast(minSimulationDelta) }
+                    )
+                    Surface(
+                        modifier = Modifier.weight(1.2f),
+                        color = BreakoutSurfaceVariant.copy(alpha = 0.72f),
+                        shape = RoundedCornerShape(BreakoutDimensions.SmallCornerRadius),
+                        border = BorderStroke(1.dp, BreakoutOutline.copy(alpha = 0.45f))
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(BreakoutDimensions.md),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(simulationWeeks.toString(), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                            Text(
+                                if (kotlin.math.abs(simulationWeeks) == 1) "week" else "weeks",
+                                color = BreakoutTextSecondary,
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                    }
+                    SecondaryButton(
+                        text = "+",
+                        modifier = Modifier.weight(1f),
+                        enabled = simulationWeeks < maxSimulatedWeekOffset,
+                        onClick = { simulationWeeks = (simulationWeeks + 1).coerceAtMost(maxSimulatedWeekOffset) }
+                    )
+                }
+                PrimaryButton(
+                    text = when {
+                        simulationWeeks > 0 -> "Simulate Forward"
+                        simulationWeeks < 0 -> "Simulate Back"
+                        else -> "Choose Week Move"
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = simulationWeeks != 0,
+                    onClick = { confirmSimulation = true }
+                )
+                AnimatedContent(
+                    targetState = rostersLocked,
+                    transitionSpec = {
+                        (fadeIn() + expandVertically()).togetherWith(fadeOut() + shrinkVertically())
+                    },
+                    label = "rosterLockDevButton"
+                ) { currentlyLocked ->
+                    SecondaryButton(
+                        text = if (currentlyLocked) "Force Unlock Rosters" else "Force Lock Rosters",
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = true,
+                        onClick = { confirmRosterLockChange = true }
+                    )
+                }
+                AlertNoticeCard(
+                    title = "Bot Schedule Warning",
+                    messages = listOf("Adding bots after a league already exists is for testing. It can rebalance members without rebuilding every past schedule perfectly, so some test schedules may feel uneven."),
+                    accent = BreakoutSecondary,
+                    symbol = "!"
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm), verticalAlignment = Alignment.CenterVertically) {
+                    SecondaryButton(
+                        text = "-",
+                        modifier = Modifier.weight(1f),
+                        enabled = botCountToAdd > 0,
+                        onClick = { botCountToAdd = (botCountToAdd - 1).coerceAtLeast(0) }
+                    )
+                    Surface(
+                        modifier = Modifier.weight(1.2f),
+                        color = BreakoutSurfaceVariant.copy(alpha = 0.72f),
+                        shape = RoundedCornerShape(BreakoutDimensions.SmallCornerRadius),
+                        border = BorderStroke(1.dp, BreakoutOutline.copy(alpha = 0.45f))
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(BreakoutDimensions.md),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(botCountToAdd.toString(), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                            Text(
+                                if (botCountToAdd == 1) "bot" else "bots",
+                                color = BreakoutTextSecondary,
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                    }
+                    SecondaryButton(
+                        text = "+",
+                        modifier = Modifier.weight(1f),
+                        enabled = botCountToAdd < availableBotSlots,
+                        onClick = { botCountToAdd = (botCountToAdd + 1).coerceAtMost(availableBotSlots) }
+                    )
+                }
+                SecondaryButton(
+                    text = if (botCountToAdd == 1) "Add Bot" else "Add Bots",
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = league.draftStatus != DraftStatus.Live && availableBotSlots > 0 && botCountToAdd > 0,
+                    onClick = { confirmAddBots = true }
+                )
+                SecondaryButton(
+                    text = if (league.isManager) "You Are Manager" else "Force Make Me Manager",
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !league.isManager && accountUsername.isNotBlank(),
+                    onClick = { confirmForceManager = true }
+                )
+            }
+        }
         if (league.isManager) {
             BreakoutCard {
                 Text("Mailing List", style = MaterialTheme.typography.titleLarge)
@@ -600,9 +846,9 @@ internal fun LeagueScreen(
             ScoreLine("Members", "${league.memberCount}/${league.maxMembers}")
             if (league.isManager) {
                 SecondaryButton(
-                    if (league.invitesOpen) "Close Invites" else "Open Invites",
+                    if (invitesLockedByDraft) "Invites Closed For Draft" else if (league.invitesOpen) "Close Invites" else "Open Invites",
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = league.isManager,
+                    enabled = league.isManager && !invitesLockedByDraft,
                     onClick = { onUpdateLeague { it.copy(invitesOpen = !it.invitesOpen) } }
                 )
             }
@@ -611,7 +857,7 @@ internal fun LeagueScreen(
                     MemberReviewRow(
                         member = member,
                         currentUsername = accountUsername,
-                        canManage = league.isManager && members.isNotEmpty(),
+                        canManage = league.isManager && mergedMembers.isNotEmpty() && !member.username.isReservedBotUsername(),
                         onOpen = { selectedMember = member },
                         onTransfer = { pendingTransfer = member },
                         onKick = { pendingKick = member }
@@ -648,6 +894,79 @@ internal fun LeagueScreen(
                 }
             )
         }
+        if (confirmSimulation) {
+            ConfirmActionCard(
+                title = when {
+                    simulationWeeks < 0 -> "Move Back ${kotlin.math.abs(simulationWeeks)} Week${if (kotlin.math.abs(simulationWeeks) == 1) "" else "s"}?"
+                    simulationWeeks > 0 -> "Simulate $simulationWeeks Week${if (simulationWeeks == 1) "" else "s"}?"
+                    else -> "No Week Move?"
+                },
+                detail = if (simulationWeeks < 0) {
+                    "This moves the simulated league view back to Week $targetSimulationWeek and clears later simulated view progress."
+                } else if (simulationWeeks == 0) {
+                    "No simulated week movement is selected."
+                } else {
+                    "This moves the simulated league view to Week $targetSimulationWeek."
+                },
+                confirmText = if (simulationWeeks < 0) "Move Back" else "Simulate",
+                onCancel = { confirmSimulation = false },
+                onConfirm = {
+                    confirmSimulation = false
+                    onSimulateWeeks(simulationWeeks)
+                }
+            )
+        }
+        if (confirmRosterLockChange) {
+            ConfirmActionCard(
+                title = if (rostersLocked) "Force Unlock Rosters?" else "Force Lock Rosters?",
+                detail = if (!rostersLocked) {
+                    "Roster active-slot moves will be blocked immediately for testing."
+                } else {
+                    "This temporarily allows active roster moves for testing in this league."
+                },
+                confirmText = if (rostersLocked) "Unlock" else "Lock",
+                onCancel = { confirmRosterLockChange = false },
+                onConfirm = {
+                    confirmRosterLockChange = false
+                    if (rostersLocked) {
+                        onForceRosterUnlockedChange(true)
+                        onForceRosterLockedChange(false)
+                    } else {
+                        onForceRosterLockedChange(true)
+                        onForceRosterUnlockedChange(false)
+                    }
+                }
+            )
+        }
+        if (confirmAddBots) {
+            ConfirmActionCard(
+                title = "Add $botCountToAdd Bot${if (botCountToAdd == 1) "" else "s"}?",
+                detail = if (league.draftStatus == DraftStatus.Complete) {
+                    "Each bot will join as a member and receive a smart-filled roster from available artists."
+                } else {
+                    "Each bot will join as an autopick member for the draft."
+                },
+                confirmText = "Add Bots",
+                onCancel = { confirmAddBots = false },
+                onConfirm = {
+                    confirmAddBots = false
+                    onAddBotMembers(botCountToAdd.coerceIn(1, availableBotSlots))
+                    botCountToAdd = 0
+                }
+            )
+        }
+        if (confirmForceManager) {
+            ConfirmActionCard(
+                title = "Force Manager Access?",
+                detail = "Developer mode will make your local account the manager and demote the previous local manager without notifying them.",
+                confirmText = "Make Me Manager",
+                onCancel = { confirmForceManager = false },
+                onConfirm = {
+                    confirmForceManager = false
+                    onForceMakeManager()
+                }
+            )
+        }
         pendingKick?.let { member ->
             ConfirmActionCard(
                 title = "Remove Member?",
@@ -664,8 +983,9 @@ internal fun LeagueScreen(
             MemberDetailDialog(
                 member = member,
                 currentUsername = accountUsername,
-                canManage = league.isManager && members.isNotEmpty() && !member.isManager &&
-                    !member.username.equals(accountUsername, ignoreCase = true),
+                canManage = league.isManager && mergedMembers.isNotEmpty() && !member.isManager &&
+                    !member.username.equals(accountUsername, ignoreCase = true) &&
+                    !member.username.isReservedBotUsername(),
                 canViewRoster = !member.username.equals(accountUsername, ignoreCase = true),
                 onDismiss = { selectedMember = null },
                 onViewRoster = {
@@ -735,4 +1055,3 @@ internal fun LeagueScreen(
         DangerButton(text = leaveActionText, onClick = { confirmLeave = true })
     }
 }
-

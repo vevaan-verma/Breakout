@@ -925,7 +925,7 @@ internal fun DraftPickStrip(
                     round = round,
                     pick = pick,
                     manager = name,
-                    artistName = draftedPick?.artist?.name,
+                    artistName = draftedPick?.artist?.displayName(),
                     autoPick = draftedPick?.autoPicked ?: userAutoPick,
                     selected = pickIndex == league.currentPickIndex,
                     onClick = draftedPick?.let { { onPickSelected(it.artist) } }
@@ -1043,7 +1043,7 @@ internal fun DraftPickSummaryRow(
     ) {
         ArtistArtwork(artist = artist, size = BreakoutDimensions.ArtworkList)
         Column(modifier = Modifier.weight(1f)) {
-            Text(artist.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(artist.displayName(), style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
                 "Round $round, Pick $pick - $pickedBy",
                 color = if (pickedBy == "You") WaiverAccent else BreakoutTextSecondary,
@@ -1228,7 +1228,7 @@ internal fun DraftSummaryPickTicket(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(3.dp)
         ) {
-            Text(pick.artist.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(pick.artist.displayName(), style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
                 if (isYou) "You" else pick.pickedBy,
                 color = if (isYou) WaiverAccent else BreakoutTextSecondary,
@@ -1288,7 +1288,7 @@ internal fun DraftSummaryPickRow(pick: DraftPickUi, onArtistSelected: () -> Unit
         }
         ArtistArtwork(artist = pick.artist, size = 54.dp)
         Column(modifier = Modifier.weight(1f)) {
-            Text(pick.artist.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(pick.artist.displayName(), style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text("${pick.pickedBy} - ${pick.slot.label}", color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Column(horizontalAlignment = Alignment.End) {
