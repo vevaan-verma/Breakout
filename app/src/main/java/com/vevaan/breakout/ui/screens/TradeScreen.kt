@@ -176,6 +176,15 @@ internal fun TradeScreen(
                 if (validation != null) {
                     StatusCard("Trade Check", validation)
                 }
+                val grandfatheredTradeArtists = (offeredItems + requestedItems).filter { it.artist.isGrandfatheredFor() }
+                if (grandfatheredTradeArtists.isNotEmpty()) {
+                    StatusCard(
+                        "Grandfathered Eligibility Transfers",
+                        grandfatheredTradeArtists.joinToString { item ->
+                            "${item.artist.name} keeps ${item.artist.acquiredRole} eligibility if the trade is accepted."
+                        }
+                    )
+                }
                 PrimaryButton(
                     text = "Send Trade",
                     enabled = validation == null && selectedMember != null && offeredItems.isNotEmpty() && requestedItems.isNotEmpty(),

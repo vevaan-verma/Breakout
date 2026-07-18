@@ -391,10 +391,15 @@ internal fun RosterScreen(
             }
         }
         pendingDrop?.let { (slot, artist) ->
+            val losesGrandfathered = artist.isGrandfatheredFor(slot)
             ConfirmActionCard(
-                title = "Drop ${artist.displayName()}?",
-                detail = "This removes the artist from your roster.",
-                confirmText = "Drop",
+                title = if (losesGrandfathered) "Lose Grandfathered Eligibility?" else "Drop ${artist.displayName()}?",
+                detail = if (losesGrandfathered) {
+                    "${artist.displayName()} is currently a ${artist.currentRoleLabel()} but retains ${artist.acquiredRole} eligibility. Dropping this artist permanently clears that retained slot eligibility."
+                } else {
+                    "This removes the artist from your roster."
+                },
+                confirmText = if (losesGrandfathered) "Drop Anyway" else "Drop",
                 onCancel = { pendingDrop = null },
                 onConfirm = {
                     pendingDrop = null

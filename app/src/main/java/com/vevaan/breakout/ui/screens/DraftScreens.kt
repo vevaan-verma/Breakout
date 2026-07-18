@@ -1099,9 +1099,23 @@ internal fun DraftSummaryScreen(
     onOpenMenu: () -> Unit,
     onArtistSelected: (ArtistUi) -> Unit
 ) {
-    val memberCount = league.memberCount.coerceAtLeast(1)
     val sortedPicks = draftPicks.sortedBy { it.pickNumber }
-    val rounds = sortedPicks.groupBy { ((it.pickNumber - 1) / memberCount) + 1 }
+    val managers = sortedPicks
+        .map { it.pickedBy }
+        .distinctBy { it.lowercase() }
+    val memberCount = maxOf(league.memberCount, managers.size, 1)
+    val picksByManager = sortedPicks.groupBy { it.pickedBy.lowercase() }
+    val roundCount = activeRosterSlots(league.settings).size.coerceAtLeast(
+        picksByManager.values.maxOfOrNull { it.size } ?: 0
+    )
+    val boardRounds = (1..roundCount).associateWith { round ->
+        managers.mapIndexedNotNull { managerIndex, manager ->
+            picksByManager[manager.lowercase()]
+                ?.sortedBy { it.pickNumber }
+                ?.getOrNull(round - 1)
+                ?.copy(pickNumber = (round - 1) * memberCount + managerIndex + 1)
+        }
+    }.filterValues { it.isNotEmpty() }
     ScreenColumn(
         refreshing = refreshing,
         onRefresh = onRefresh,
@@ -1113,7 +1127,7 @@ internal fun DraftSummaryScreen(
             subtitle = "Every pick, round, manager, and pick time in one clean draft record.",
             stats = listOf(
                 Triple("Picks", sortedPicks.size.toString(), "Completed"),
-                Triple("Rounds", rounds.keys.maxOrNull()?.toString() ?: "--", league.settings.draftFormat.label),
+                Triple("Rounds", boardRounds.keys.maxOrNull()?.toString() ?: "--", league.settings.draftFormat.label),
                 Triple("Members", memberCount.toString(), "Draft order"),
                 Triple("Clock", "${league.settings.pickSeconds}s", "Pick limit")
             ),
@@ -1122,7 +1136,7 @@ internal fun DraftSummaryScreen(
         if (sortedPicks.isEmpty()) {
             StatusCard("No Draft Picks", "The completed draft history will appear here once picks are synced.")
         } else {
-            rounds.forEach { (round, picks) ->
+            boardRounds.forEach { (round, picks) ->
                 DraftSummaryRoundCard(
                     round = round,
                     picks = picks,

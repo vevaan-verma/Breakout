@@ -356,8 +356,8 @@ internal fun AllMatchupsScreen(
         selectedWeek = simulatedInitialWeek
     }
     val pairs = matchupPairsForWeek(memberNames, selectedWeek)
-    LaunchedEffect(selectedWeek, pairs.size) {
-        selectedPairIndex = selectedPairIndex.coerceIn(0, (pairs.size - 1).coerceAtLeast(0))
+    LaunchedEffect(selectedWeek, pairs.size, currentUsername) {
+        selectedPairIndex = 0
     }
     ScreenColumn(
         refreshing = refreshing,
@@ -508,6 +508,28 @@ internal fun AllMatchupCard(
             MatchupScoreSide(leftDisplayName, leftCurrentScore?.formatPoints() ?: "--", leftProjectedScore?.formatPoints() ?: "--", Modifier.weight(1f), alignEnd = false)
             Text("VS", color = BreakoutPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
             MatchupScoreSide(rightDisplayName, rightCurrentScore?.formatPoints() ?: "--", rightProjectedScore?.formatPoints() ?: "--", Modifier.weight(1f), alignEnd = true)
+        }
+        if (currentScoresAvailable && rightName != null && leftCurrentScore != null && rightCurrentScore != null) {
+            val winnerLabel = when {
+                leftCurrentScore > rightCurrentScore -> leftDisplayName
+                rightCurrentScore > leftCurrentScore -> rightDisplayName
+                else -> "Tie"
+            }
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = if (winnerLabel == "Tie") BreakoutSurfaceVariant.copy(alpha = 0.58f) else WaiverAccent.copy(alpha = 0.12f),
+                shape = RoundedCornerShape(BreakoutDimensions.SmallCornerRadius),
+                border = BorderStroke(1.dp, if (winnerLabel == "Tie") BreakoutOutline.copy(alpha = 0.32f) else WaiverAccent.copy(alpha = 0.38f))
+            ) {
+                Text(
+                    if (winnerLabel == "Tie") "Final: Tie" else "Winner: $winnerLabel",
+                    modifier = Modifier.padding(horizontal = BreakoutDimensions.md, vertical = BreakoutDimensions.sm),
+                    color = if (winnerLabel == "Tie") BreakoutTextSecondary else WaiverAccent,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Black,
+                    textAlign = TextAlign.Center
+                )
+            }
         }
         startingSlots.forEach { slot ->
             MatchupSlotComparisonRow(

@@ -598,7 +598,8 @@ internal data class ArtistUi(
     val serverWeekStart: String? = null,
     val serverScoreDate: String? = null,
     val serverActualPoints: Double? = null,
-    val serverProjectedPoints: Double? = null
+    val serverProjectedPoints: Double? = null,
+    val acquiredRole: String? = null
 ) {
     val initials: String = name
         .split(" ")
@@ -2661,7 +2662,8 @@ internal object SupabaseLeagueService {
                     imageUrl = item.optString("image_url").ifBlank { null },
                     source = "Draft",
                     scoreStatus = "Drafted",
-                    lastFmPlaycount = if (item.isNull("playcount")) null else item.optLong("playcount")
+                    lastFmPlaycount = if (item.isNull("playcount")) null else item.optLong("playcount"),
+                    acquiredRole = slot.roleLabel()
                 ),
                 secondsToPick = if (item.isNull("seconds_to_pick")) null else item.optInt("seconds_to_pick"),
                 autoPicked = item.optBoolean("auto_picked", false)
@@ -2692,7 +2694,8 @@ internal object SupabaseLeagueService {
                     imageUrl = item.optString("image_url").ifBlank { null },
                     source = "Roster",
                     scoreStatus = "Rostered",
-                    lastFmPlaycount = if (item.isNull("playcount")) null else item.optLong("playcount")
+                    lastFmPlaycount = if (item.isNull("playcount")) null else item.optLong("playcount"),
+                    acquiredRole = slot.roleLabel()
                 )
             }
         }
@@ -3346,6 +3349,7 @@ internal object LocalBreakoutStore {
     private const val LocalMembersKey = "local_members"
     private const val LocalDraftPicksKey = "local_draft_picks"
     private const val LocalTradeOffersKey = "local_trade_offers"
+    private const val SimulatedWeekOffsetsKey = "simulated_week_offsets"
 
     fun loadAccount(context: Context): AccountUi? {
         val raw = prefs(context).getString(AccountKey, null) ?: return null
@@ -3594,6 +3598,20 @@ internal object LocalBreakoutStore {
         prefs(context).edit().putBoolean(EncoreModeKey, enabled).apply()
     }
 
+    fun loadSimulatedWeekOffsets(context: Context): Map<String, Int> {
+        val raw = prefs(context).getString(SimulatedWeekOffsetsKey, "{}").orEmpty()
+        return runCatching {
+            val item = JSONObject(raw.ifBlank { "{}" })
+            item.keys().asSequence().associateWith { key -> item.optInt(key, 0) }
+        }.getOrDefault(emptyMap())
+    }
+
+    fun saveSimulatedWeekOffsets(context: Context, offsets: Map<String, Int>) {
+        val item = JSONObject()
+        offsets.forEach { (leagueId, offset) -> item.put(leagueId, offset) }
+        prefs(context).edit().putString(SimulatedWeekOffsetsKey, item.toString()).apply()
+    }
+
     fun loadLocalMembers(context: Context, leagueKey: String? = null): List<LeagueMemberUi> {
         val raw = prefs(context).getString(localMembersStorageKey(leagueKey), "[]").orEmpty()
         return runCatching {
@@ -3829,7 +3847,8 @@ internal object LocalBreakoutStore {
         serverWeekStart = optString("serverWeekStart").ifBlank { null },
         serverScoreDate = optString("serverScoreDate").ifBlank { null },
         serverActualPoints = if (isNull("serverActualPoints")) null else optDouble("serverActualPoints"),
-        serverProjectedPoints = if (isNull("serverProjectedPoints")) null else optDouble("serverProjectedPoints")
+        serverProjectedPoints = if (isNull("serverProjectedPoints")) null else optDouble("serverProjectedPoints"),
+        acquiredRole = optString("acquiredRole").ifBlank { null }
     )
 
     private fun JSONObject.putStoredArtist(artist: ArtistUi) {
@@ -3887,6 +3906,7 @@ internal object LocalBreakoutStore {
         put("serverScoreDate", artist.serverScoreDate)
         put("serverActualPoints", artist.serverActualPoints)
         put("serverProjectedPoints", artist.serverProjectedPoints)
+        put("acquiredRole", artist.acquiredRole)
     }
 
     private fun JSONObject.toLeagueSettings(): LeagueSettingsUi = LeagueSettingsUi(
@@ -3984,7 +4004,7 @@ internal fun BreakoutApp(
     var forcedAutoPickLeagueIds by rememberSaveable { mutableStateOf(setOf<String>()) }
     var devModeRequested by rememberSaveable { mutableStateOf(LocalBreakoutStore.loadDevModeEnabled(context)) }
     var spotlightModeRequested by rememberSaveable { mutableStateOf(LocalBreakoutStore.loadEncoreModeEnabled(context)) }
-    var simulatedWeekOffsetByLeagueId by rememberSaveable { mutableStateOf<Map<String, Int>>(emptyMap()) }
+    var simulatedWeekOffsetByLeagueId by rememberSaveable { mutableStateOf(LocalBreakoutStore.loadSimulatedWeekOffsets(context)) }
     var forceRosterUnlockedByLeagueId by rememberSaveable { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
     var forceRosterLockedByLeagueId by rememberSaveable { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
     var simulationLoading by remember { mutableStateOf(false) }
@@ -4056,7 +4076,13 @@ internal fun BreakoutApp(
         if (draftStatus == DraftStatus.Scheduled || !invitesOpen) this else copy(invitesOpen = false)
 
     fun applyRemoteLeagues(remoteLeagues: List<LeagueUi>, notifyDeleted: Boolean = true) {
-        val normalizedLeagues = remoteLeagues.map { it.withDraftInviteLock() }
+        val username = account?.username.orEmpty()
+        val normalizedLeagues = remoteLeagues.map { remote ->
+            val selfForcedManager = username.isNotBlank() &&
+                LocalBreakoutStore.loadLocalMembers(context, remote.id.ifBlank { remote.inviteCode })
+                    .any { it.username.equals(username, ignoreCase = true) && it.isManager }
+            remote.withDraftInviteLock().let { if (selfForcedManager) it.copy(isManager = true) else it }
+        }
         val previousActive = league
         val activeWasRemoved = previousActive != null &&
             normalizedLeagues.none { remote ->
@@ -4099,7 +4125,19 @@ internal fun BreakoutApp(
     fun membersWithLocalBots(leagueId: String, loadedMembers: List<LeagueMemberUi>): List<LeagueMemberUi> {
         val localMembers = leagueMembersById[leagueId].orEmpty() +
             LocalBreakoutStore.loadLocalMembers(context, leagueId)
-        return (localMembers + loadedMembers).distinctBy { it.username.lowercase() }
+        val localManagerName = localMembers.firstOrNull { it.isManager }?.username
+        val normalizedLoaded = if (localManagerName != null) {
+            loadedMembers.map { member ->
+                if (!member.username.equals(localManagerName, ignoreCase = true) && member.isManager) {
+                    member.copy(role = "member")
+                } else {
+                    member
+                }
+            }
+        } else {
+            loadedMembers
+        }
+        return (localMembers + normalizedLoaded).distinctBy { it.username.lowercase() }
     }
 
     fun draftPicksWithLocalBots(leagueId: String, loadedPicks: List<DraftPickUi>): List<DraftPickUi> {
@@ -4157,7 +4195,7 @@ internal fun BreakoutApp(
                 slot = slot,
                 autoPicked = autoPicked
             ).onSuccess {
-                roster = draftRoster + (slot to artist)
+                roster = draftRoster + (slot to artist.withAcquiredRole())
                 SupabaseLeagueService.loadLeagues(current.accessToken, current.userId).onSuccess { remoteLeagues ->
                     applyRemoteLeagues(remoteLeagues)
                 }
@@ -4652,7 +4690,7 @@ internal fun BreakoutApp(
             }
             val slot = firstOpenSlotFor(claim.artist, rosterAfterDrop, activeLeague.settings)
             if (slot != null) {
-                updatedRoster = rosterAfterDrop + (slot to claim.artist)
+                updatedRoster = rosterAfterDrop + (slot to claim.artist.withAcquiredRole())
                 awardedWaivers = awardedWaivers + claim.artist.name.lowercase()
                 results += WaiverResultUi(claim.artist.name, "Processed", "$claimDisplayName was added to your roster.")
             } else {
@@ -4798,7 +4836,7 @@ internal fun BreakoutApp(
                             artist.name.lowercase() !in unavailableNames && slot.canHold(artist)
                         }
                         if (pick != null) {
-                            botRoster[slot] = pick
+                            botRoster[slot] = pick.withAcquiredRole()
                             unavailableNames += pick.name.lowercase()
                         }
                     }
@@ -4809,7 +4847,7 @@ internal fun BreakoutApp(
                             pickNumber = round * newMemberCount + botSlotInRound + 1,
                             pickedBy = bot.username,
                             slot = slot,
-                            artist = artist,
+                            artist = artist.withAcquiredRole(),
                             autoPicked = true
                         )
                     }
@@ -4850,7 +4888,7 @@ internal fun BreakoutApp(
         LocalBreakoutStore.saveLocalMembers(
             context,
             activeLeague.id.ifBlank { activeLeague.inviteCode },
-            updatedMembers.filter { it.username.isReservedBotUsername() || it.username.equals(username, ignoreCase = true) }
+            updatedMembers
         )
         leagues = leagues.map {
             if (it.id == activeLeague.id || it.inviteCode == activeLeague.inviteCode) it.copy(isManager = true) else it
@@ -5486,6 +5524,10 @@ internal fun BreakoutApp(
         league?.let { LocalBreakoutStore.saveWaiverClaims(context, waiverClaims, it.id.ifBlank { it.inviteCode }) }
     }
 
+    LaunchedEffect(simulatedWeekOffsetByLeagueId) {
+        LocalBreakoutStore.saveSimulatedWeekOffsets(context, simulatedWeekOffsetByLeagueId)
+    }
+
     LaunchedEffect(league?.id, droppedArtistsByLeagueId) {
         league?.let { active ->
             val key = active.id.ifBlank { active.inviteCode }
@@ -6084,9 +6126,7 @@ internal fun BreakoutApp(
                             league = activeLeague,
                             account = account,
                             draftPicks = draftPicksByLeagueId[activeLeague.id].orEmpty(),
-                            localMembers = leagueMembersById[activeLeague.id].orEmpty().filter {
-                                it.username.isReservedBotUsername() || it.username.equals(account?.username.orEmpty(), ignoreCase = true)
-                            },
+                            localMembers = leagueMembersById[activeLeague.id].orEmpty(),
                             refreshing = refreshingLeagueData,
                             onRefresh = ::refreshRemoteLeagues,
                             onOpenMenu = { scope.launch { drawerState.open() } },
@@ -6354,16 +6394,20 @@ internal fun BreakoutApp(
                                         cached.snapshotListeners != null)
                             }
                             ?: artist
+                        val scoreSourceArtist = visibleRoster.values.firstOrNull { it.name.equals(artist.name, ignoreCase = true) }
+                            ?: draftedPick?.artist
+                            ?: detailArtist
+                        val detailArtistForScreen = detailArtist.copy(acquiredRole = scoreSourceArtist.acquiredRole)
                         Surface(
                             modifier = Modifier.fillMaxSize(),
                             color = MaterialTheme.colorScheme.background
                         ) {
                             ArtistDetailScreen(
-                                artist = detailArtist,
+                                artist = detailArtistForScreen,
                                 isInRoster = visibleRoster.values.any { it.name == artist.name },
                                 draftStatus = activeLeague.draftStatus,
                                 weeklyPoints = weeklyPointsForArtist(
-                                    detailArtist,
+                                    scoreSourceArtist,
                                     activeLeague,
                                     weekOffset = activeSimulatedWeekOffset
                                 ),
@@ -6406,7 +6450,7 @@ internal fun BreakoutApp(
                                 },
                                 onAddToRoster = {
                                     firstOpenSlotFor(artist, visibleRoster, activeLeague.settings)?.let { slot ->
-                                        roster = roster + (slot to artist)
+                                        roster = roster + (slot to artist.withAcquiredRole())
                                     }
                                 },
                             onRemoveFromRoster = {

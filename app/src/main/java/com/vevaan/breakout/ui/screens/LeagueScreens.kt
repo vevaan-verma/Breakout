@@ -408,7 +408,10 @@ internal fun LeagueScreen(
     val mergedMembers = (localMembers + members)
         .distinctBy { it.username.lowercase() }
     val availableBotSlots = (league.maxMembers - mergedMembers.size).coerceAtLeast(0)
-    val visibleMembers = mergedMembers.ifEmpty {
+    val visibleMembers = mergedMembers.sortedWith(
+        compareByDescending<LeagueMemberUi> { it.isManager }
+            .thenBy { it.username.lowercase() }
+    ).ifEmpty {
         listOf(
             LeagueMemberUi(
                 username = accountMemberName,
@@ -532,7 +535,10 @@ internal fun LeagueScreen(
                     onUpdateLeague { it.copy(settings = settings.copy(draftFormat = settings.draftFormat.next())) }
                 }
             )
-            Column(verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)) {
+            Column(
+                modifier = Modifier.animateContentSize(),
+                verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
+            ) {
                 Text("Draft Time", color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium)
                 if (league.memberCount < MinLeagueMembers) {
                     Surface(

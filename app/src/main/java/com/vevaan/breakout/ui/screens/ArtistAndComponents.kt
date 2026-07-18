@@ -375,10 +375,15 @@ internal fun ArtistDetailScreen(
             )
         }
         if (confirmRemove) {
+            val losesGrandfathered = shownArtist.isGrandfatheredFor()
             ConfirmActionCard(
-                title = "Drop ${shownArtist.displayName()}?",
-                detail = "This removes the artist from your roster.",
-                confirmText = "Drop",
+                title = if (losesGrandfathered) "Lose Grandfathered Eligibility?" else "Drop ${shownArtist.displayName()}?",
+                detail = if (losesGrandfathered) {
+                    "${shownArtist.displayName()} is currently a ${shownArtist.currentRoleLabel()} but retains ${shownArtist.acquiredRole} eligibility. If you drop this artist, that retained eligibility is permanently lost."
+                } else {
+                    "This removes the artist from your roster."
+                },
+                confirmText = if (losesGrandfathered) "Drop Anyway" else "Drop",
                 onCancel = { confirmRemove = false },
                 onConfirm = {
                     confirmRemove = false
@@ -491,6 +496,24 @@ private fun ArtistMarketIntelCard(shownArtist: ArtistUi, marketScoreArtist: Arti
                 "Top City",
                 listOfNotNull(city, shownArtist.topCityListenersLabel).joinToString(" - ")
             )
+        }
+        if (shownArtist.acquiredRole != null) {
+            ScoreLine("Current Role", shownArtist.currentRoleLabel())
+            ScoreLine(
+                "Roster Eligibility",
+                if (shownArtist.isGrandfatheredFor()) {
+                    "${shownArtist.acquiredRole} - Grandfathered"
+                } else {
+                    shownArtist.acquiredRole
+                }
+            )
+            if (shownArtist.isGrandfatheredFor()) {
+                Text(
+                    "This artist was acquired while eligible as a ${shownArtist.acquiredRole} and may remain in that slot while continuously rostered.",
+                    color = BreakoutTextSecondary,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
         }
         ScoreLine("Fantasy Read", shownArtist.marketNote)
     }
@@ -675,6 +698,12 @@ internal fun WaiverDropSlotDialog(
                                 Text(currentArtist.displayName(), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(currentArtist.tag, color = BreakoutTextSecondary, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
+                            Text(
+                                "Replace",
+                                color = WaiverAccent,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Black
+                            )
                         }
                     }
                 }
@@ -1543,7 +1572,12 @@ internal fun RosterSlotCard(
                         .heightIn(min = 72.dp),
                     verticalArrangement = Arrangement.Center
                 ) {
-                    Text(slot.label, color = BreakoutSecondary, style = MaterialTheme.typography.labelLarge, maxLines = 1)
+                    Text(
+                        if (shownArtist?.isGrandfatheredFor(slot) == true) "${shownArtist.currentRoleLabel()} now" else slot.label,
+                        color = BreakoutSecondary,
+                        style = MaterialTheme.typography.labelLarge,
+                        maxLines = 1
+                    )
                     Text(
                         text = shownArtist?.displayName() ?: emptyTitle,
                         style = MaterialTheme.typography.titleMedium,
@@ -1552,8 +1586,12 @@ internal fun RosterSlotCard(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        shownArtist?.audienceLabel ?: slot.hint,
-                        color = BreakoutTextSecondary,
+                        if (shownArtist?.isGrandfatheredFor(slot) == true) {
+                            "${shownArtist.acquiredRole} slot retained"
+                        } else {
+                            shownArtist?.audienceLabel ?: slot.hint
+                        },
+                        color = if (shownArtist?.isGrandfatheredFor(slot) == true) WaiverAccent else BreakoutTextSecondary,
                         style = MaterialTheme.typography.bodyMedium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -1976,9 +2014,7 @@ internal fun AlertNoticeCard(
                         message,
                         color = MaterialTheme.colorScheme.onSurface,
                         style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.weight(1f),
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
+                        modifier = Modifier.weight(1f)
                     )
                 }
             }
@@ -3565,19 +3601,49 @@ internal fun preferredSlotsFor(artist: ArtistUi): List<RosterSlot> = when {
     else -> benchSlots()
 }
 
+internal fun ArtistUi.currentRoleLabel(): String = tag
+
+internal fun ArtistUi.withAcquiredRole(): ArtistUi =
+    if (acquiredRole.isNullOrBlank()) copy(acquiredRole = currentRoleLabel()) else this
+
+internal fun ArtistUi.isGrandfatheredFor(slot: RosterSlot? = null): Boolean {
+    val retainedRole = acquiredRole ?: return false
+    val changedRole = !retainedRole.equals(currentRoleLabel(), ignoreCase = true)
+    return changedRole && (slot == null || slot.roleLabel()?.equals(retainedRole, ignoreCase = true) == true)
+}
+
+internal fun RosterSlot.roleLabel(): String? = when (this) {
+    RosterSlot.HeadlinerOne,
+    RosterSlot.HeadlinerTwo,
+    RosterSlot.HeadlinerThree,
+    RosterSlot.HeadlinerFour -> "Headliner"
+    RosterSlot.WildcardOne,
+    RosterSlot.WildcardTwo,
+    RosterSlot.WildcardThree,
+    RosterSlot.WildcardFour -> "Mainstay"
+    RosterSlot.RisingOne,
+    RosterSlot.RisingTwo,
+    RosterSlot.RisingThree,
+    RosterSlot.RisingFour -> "Rising"
+    RosterSlot.DeepCutOne,
+    RosterSlot.DeepCutTwo,
+    RosterSlot.DeepCutThree -> "Deep Cut"
+    else -> null
+}
+
 internal fun RosterSlot.canHold(artist: ArtistUi): Boolean = when (this) {
     RosterSlot.HeadlinerOne,
     RosterSlot.HeadlinerTwo,
     RosterSlot.HeadlinerThree,
-    RosterSlot.HeadlinerFour -> artist.isHeadlinerEligible()
+    RosterSlot.HeadlinerFour -> artist.isHeadlinerEligible() || artist.acquiredRole.equals("Headliner", ignoreCase = true)
     RosterSlot.RisingOne,
     RosterSlot.RisingTwo,
     RosterSlot.RisingThree,
-    RosterSlot.RisingFour -> artist.isRisingEligible()
+    RosterSlot.RisingFour -> artist.isRisingEligible() || artist.acquiredRole.equals("Rising", ignoreCase = true)
     RosterSlot.WildcardOne,
     RosterSlot.WildcardTwo,
     RosterSlot.WildcardThree,
-    RosterSlot.WildcardFour -> artist.isMainstayEligible()
+    RosterSlot.WildcardFour -> artist.isMainstayEligible() || artist.acquiredRole.equals("Mainstay", ignoreCase = true)
     RosterSlot.BenchOne,
     RosterSlot.BenchTwo,
     RosterSlot.BenchThree,
@@ -3586,7 +3652,7 @@ internal fun RosterSlot.canHold(artist: ArtistUi): Boolean = when (this) {
     RosterSlot.BenchSix -> true
     RosterSlot.DeepCutOne,
     RosterSlot.DeepCutTwo,
-    RosterSlot.DeepCutThree -> artist.isDeepCutEligible()
+    RosterSlot.DeepCutThree -> artist.isDeepCutEligible() || artist.acquiredRole.equals("Deep Cut", ignoreCase = true)
 }
 
 internal fun activeRosterSlots(settings: LeagueSettingsUi): List<RosterSlot> =
@@ -4219,7 +4285,6 @@ internal fun ArtistUi.leagueWeekScore(week: Int): Double {
 }
 
 internal fun ArtistUi.projectedWeekScore(week: Int): Double {
-    serverProjectedPoints?.let { return it.coerceIn(0.0, 100.0) }
     val breakout = breakoutScore(null)
     val audienceMove = kworbDailyListenerChange?.let { signedLogSignal(it) } ?: normalizedAudienceFloor(listeners) * 100.0
     val weeklyGrowth = weeklyListenerGrowthPercent?.let { (40.0 + it.coerceIn(-30.0, 220.0) * 0.24).coerceIn(10.0, 104.0) } ?: audienceMove
@@ -4251,7 +4316,6 @@ internal fun ArtistUi.projectedWeekScore(week: Int): Double {
 }
 
 internal fun ArtistUi.actualWeekScore(week: Int): Double {
-    serverActualPoints?.let { return it.coerceIn(0.0, 100.0) }
     val identitySeed = name.artistKey().fold(0) { acc, char -> (acc * 31) + char.code }
     val wave = (((identitySeed + week * 37) % 29) - 14) / 100.0
     val secondWave = (((identitySeed / 7 + week * 53) % 23) - 11) / 100.0
