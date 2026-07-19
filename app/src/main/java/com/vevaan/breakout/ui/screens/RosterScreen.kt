@@ -190,6 +190,96 @@ import kotlin.random.Random
 private val WaiverOrderSectionMinHeight = 220.dp
 
 @Composable
+private fun RosterTimingCard(
+    locked: Boolean,
+    devLockActive: Boolean,
+    nextTransitionAt: String?,
+    nextTransitionKind: String?
+) {
+    BreakoutCard(
+        border = BorderStroke(1.dp, if (locked) BreakoutCoral.copy(alpha = 0.38f) else BreakoutPrimary.copy(alpha = 0.38f))
+    ) {
+        Text(
+            when {
+                devLockActive -> "Dev Lock Active"
+                locked -> "Rosters Locked"
+                else -> "Rosters Unlocked"
+            },
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Black
+        )
+        Text(
+            if (devLockActive) {
+                "Active roster slots are locked by a developer override. Bench artists may still be rearranged."
+            } else if (locked) {
+                "Active roster slots are locked for this scoring week. Bench artists may still be rearranged."
+            } else {
+                "Roster and lineup changes are available until the next scoring window."
+            },
+            color = BreakoutTextSecondary,
+            style = MaterialTheme.typography.bodyMedium
+        )
+        val action = when (nextTransitionKind) {
+            "lock" -> "Locks"
+            "unlock" -> "Unlocks"
+            else -> if (locked) "Unlocks" else "Locks"
+        }
+        TimerLine(
+            title = action,
+            timestamp = nextTransitionAt,
+            unavailable = "Roster timer unavailable"
+        )
+    }
+}
+
+@Composable
+internal fun TimerLine(
+    title: String,
+    timestamp: String?,
+    unavailable: String
+) {
+    val formatted = timestamp?.formatUtcForDevice()
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            title,
+            color = BreakoutTextSecondary,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            formatted ?: unavailable,
+            color = if (formatted == null) BreakoutTextSecondary else Color.White,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold
+        )
+        timestamp?.countdownLabel()?.let {
+            Text(it, color = BreakoutPrimary, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+private fun String.formatUtcForDevice(): String? = runCatching {
+    OffsetDateTime.parse(this)
+        .atZoneSameInstant(ZoneId.systemDefault())
+        .format(DateTimeFormatter.ofPattern("EEEE 'at' h:mm a z"))
+}.getOrNull()
+
+private fun String.countdownLabel(): String? = runCatching {
+    val target = OffsetDateTime.parse(this).toInstant()
+    val now = Instant.now()
+    if (!target.isAfter(now)) return@runCatching "ready now"
+    val minutes = ChronoUnit.MINUTES.between(now, target).coerceAtLeast(0)
+    val days = minutes / (60 * 24)
+    val hours = (minutes / 60) % 24
+    val mins = minutes % 60
+    buildString {
+        if (days > 0) append("${days}d ")
+        if (hours > 0 || days > 0) append("${hours}h ")
+        append("${mins}m remaining")
+    }.trim()
+}.getOrNull()
+
+@Composable
 internal fun RosterScreen(
     roster: Map<RosterSlot, ArtistUi>,
     waiverClaims: List<WaiverClaimUi>,
@@ -198,6 +288,10 @@ internal fun RosterScreen(
     memberCount: Int,
     draftStatus: DraftStatus,
     rosterMovesLocked: Boolean = false,
+    devLockActive: Boolean = false,
+    rosterNextTransitionAt: String? = null,
+    rosterNextTransitionKind: String? = null,
+    nextWaiverProcessingAt: String? = null,
     draftRoomContext: Boolean,
     refreshing: Boolean,
     onRefresh: () -> Unit,
@@ -235,15 +329,16 @@ internal fun RosterScreen(
         }
     ) {
         val slots = activeRosterSlots(leagueSettings)
+        RosterTimingCard(
+            locked = rosterMovesLocked,
+            devLockActive = devLockActive,
+            nextTransitionAt = rosterNextTransitionAt,
+            nextTransitionKind = if (rosterMovesLocked) "unlock" else rosterNextTransitionKind
+        )
         if (draftStatus == DraftStatus.Scheduled || draftStatus == DraftStatus.Lobby) {
             StatusCard(
                 title = "Roster Locked",
                 detail = "Rosters are filled during the live draft."
-            )
-        } else if (rosterMovesLocked) {
-            StatusCard(
-                title = "Lineup Locked",
-                detail = "Active roster slots are locked for this scoring week. Bench artists can still be swapped with each other."
             )
         }
         Column(
@@ -253,6 +348,24 @@ internal fun RosterScreen(
             verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.CardSpacing)
         ) {
             slots.forEach { slot ->
+                Row(
+                    modifier = Modifier.padding(start = BreakoutDimensions.xs),
+                    horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(9.dp)
+                            .clip(CircleShape)
+                            .background(BreakoutPrimary)
+                    )
+                    Text(
+                        slot.label,
+                        color = BreakoutTextSecondary,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
                 RosterSlotCard(
                     modifier = Modifier.fillMaxWidth(),
                     slot = slot,
@@ -299,6 +412,11 @@ internal fun RosterScreen(
                         fontWeight = FontWeight.Black
                     )
                 }
+                TimerLine(
+                    title = "Next waiver run",
+                    timestamp = nextWaiverProcessingAt,
+                    unavailable = "Next waiver run unavailable"
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.CardSpacing)) {
                     StatTile("Waiver Priority", "#1", "This week", Modifier.weight(1f))
                     StatTile(
@@ -391,15 +509,15 @@ internal fun RosterScreen(
             }
         }
         pendingDrop?.let { (slot, artist) ->
-            val losesGrandfathered = artist.isGrandfatheredFor(slot)
+            val losesLegacyEligibility = artist.isGrandfatheredFor(slot)
             ConfirmActionCard(
-                title = if (losesGrandfathered) "Lose Grandfathered Eligibility?" else "Drop ${artist.displayName()}?",
-                detail = if (losesGrandfathered) {
-                    "${artist.displayName()} is currently a ${artist.currentRoleLabel()} but retains ${artist.acquiredRole} eligibility. Dropping this artist permanently clears that retained slot eligibility."
+                title = if (losesLegacyEligibility) "Lose Legacy Eligibility?" else "Drop ${artist.displayName()}?",
+                detail = if (losesLegacyEligibility) {
+                    "${artist.displayName()} is now a ${artist.currentRoleLabel()} but remains ${artist.acquiredRole} Eligible because they were acquired in that role.\n\nIf you drop them, this eligibility will be permanently lost. If you add them again later, they will use their current role."
                 } else {
                     "This removes the artist from your roster."
                 },
-                confirmText = if (losesGrandfathered) "Drop Anyway" else "Drop",
+                confirmText = if (losesLegacyEligibility) "Drop Anyway" else "Drop",
                 onCancel = { pendingDrop = null },
                 onConfirm = {
                     pendingDrop = null
@@ -466,29 +584,54 @@ internal fun MoveRosterSlotDialog(
     onDismiss: () -> Unit,
     onMove: (RosterSlot) -> Unit
 ) {
-    Dialog(onDismissRequest = onDismiss) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
         Surface(
             color = BreakoutSurface.copy(alpha = 0.98f),
             shape = RoundedCornerShape(BreakoutDimensions.CardCornerRadius),
-            border = BorderStroke(1.dp, BreakoutOutline.copy(alpha = 0.85f)),
-            tonalElevation = 8.dp
+            border = BorderStroke(1.dp, BreakoutPrimary.copy(alpha = 0.72f)),
+            tonalElevation = 8.dp,
+            modifier = Modifier
+                .fillMaxWidth(0.94f)
+                .widthIn(max = 560.dp)
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(BreakoutDimensions.xl),
-                verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.md)
+                    .padding(horizontal = BreakoutDimensions.xl, vertical = BreakoutDimensions.lg),
+                verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.lg)
             ) {
-                Text(
-                    "Move ${artist.displayName()}",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    "Choose a slot this artist can occupy.",
-                    color = BreakoutTextSecondary,
-                    style = MaterialTheme.typography.bodyMedium
-                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.lg),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(72.dp)
+                            .clip(CircleShape)
+                            .background(BreakoutPrimary.copy(alpha = 0.18f))
+                            .border(1.dp, BreakoutPrimary.copy(alpha = 0.62f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("S", color = BreakoutPrimary, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.xs)) {
+                        Text(
+                            "Swap",
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.Black
+                        )
+                        Text(
+                            "Swap ${artist.displayName()}",
+                            color = BreakoutTextSecondary,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
                 if (targets.isEmpty()) {
                     StatusCard(
                         "No Valid Slots",
@@ -503,7 +646,7 @@ internal fun MoveRosterSlotDialog(
                                 .clickable { onMove(slot) },
                             color = BreakoutSurfaceVariant.copy(alpha = 0.72f),
                             shape = RoundedCornerShape(BreakoutDimensions.SmallCornerRadius),
-                            border = BorderStroke(1.dp, BreakoutOutline.copy(alpha = 0.45f))
+                            border = BorderStroke(1.dp, BreakoutPrimary.copy(alpha = 0.28f))
                         ) {
                             Row(
                                 modifier = Modifier.padding(BreakoutDimensions.md),
@@ -533,7 +676,7 @@ internal fun MoveRosterSlotDialog(
                                         overflow = TextOverflow.Ellipsis
                                     )
                                 }
-                                Text("Swap", color = BreakoutPrimary, fontWeight = FontWeight.Bold)
+                                Text("Swap", color = BreakoutPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
                             }
                         }
                     }
@@ -555,29 +698,50 @@ internal fun FillRosterSlotDialog(
     onDismiss: () -> Unit,
     onMove: (RosterSlot) -> Unit
 ) {
-    Dialog(onDismissRequest = onDismiss) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
         Surface(
             color = BreakoutSurface.copy(alpha = 0.98f),
             shape = RoundedCornerShape(BreakoutDimensions.CardCornerRadius),
-            border = BorderStroke(1.dp, BreakoutOutline.copy(alpha = 0.85f)),
-            tonalElevation = 8.dp
+            border = BorderStroke(1.dp, BreakoutPrimary.copy(alpha = 0.72f)),
+            tonalElevation = 8.dp,
+            modifier = Modifier
+                .fillMaxWidth(0.94f)
+                .widthIn(max = 560.dp)
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(BreakoutDimensions.xl),
-                verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.md)
+                    .padding(horizontal = BreakoutDimensions.xl, vertical = BreakoutDimensions.lg),
+                verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.lg)
             ) {
-                Text(
-                    "Fill ${slot.label}",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    "Move a compatible artist into this open slot.",
-                    color = BreakoutTextSecondary,
-                    style = MaterialTheme.typography.bodyMedium
-                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.lg),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(72.dp)
+                            .clip(CircleShape)
+                            .background(BreakoutPrimary.copy(alpha = 0.18f))
+                            .border(1.dp, BreakoutPrimary.copy(alpha = 0.62f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("S", color = BreakoutPrimary, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.xs)) {
+                        Text("Swap", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                        Text(
+                            "Swap into ${slot.label}",
+                            color = BreakoutTextSecondary,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
                 if (options.isEmpty()) {
                     StatusCard(
                         "No Compatible Artists",
@@ -591,7 +755,7 @@ internal fun FillRosterSlotDialog(
                                 .clickable { onMove(sourceSlot) },
                             color = BreakoutSurfaceVariant.copy(alpha = 0.72f),
                             shape = RoundedCornerShape(BreakoutDimensions.SmallCornerRadius),
-                            border = BorderStroke(1.dp, BreakoutOutline.copy(alpha = 0.45f))
+                            border = BorderStroke(1.dp, BreakoutPrimary.copy(alpha = 0.28f))
                         ) {
                             Row(
                                 modifier = Modifier.padding(BreakoutDimensions.md),
@@ -618,7 +782,7 @@ internal fun FillRosterSlotDialog(
                                         overflow = TextOverflow.Ellipsis
                                     )
                                 }
-                                Text("Move", color = BreakoutPrimary, fontWeight = FontWeight.Bold)
+                                Text("Swap", color = BreakoutPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
                             }
                         }
                     }

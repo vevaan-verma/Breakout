@@ -8,6 +8,7 @@ import android.os.Build
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.BorderStroke
@@ -169,6 +170,8 @@ internal fun ArtistDetailScreen(
     isWaiverQueued: Boolean,
     canAddToRoster: Boolean,
     canQueueWaiver: Boolean,
+    resolvedAction: ResolvedArtistAction? = null,
+    waiverUnavailableDetail: String? = null,
     waiverReplacementOptions: List<Pair<RosterSlot, ArtistUi>> = emptyList(),
     onAddToRoster: () -> Unit,
     onRemoveFromRoster: () -> Unit,
@@ -202,6 +205,10 @@ internal fun ArtistDetailScreen(
     }
     val shownArtist = detailArtist
     val marketScoreArtist = artist
+    val action = resolvedAction
+    val effectiveWaiverQueued = action?.waiverQueued ?: isWaiverQueued
+    val effectiveCanQueueWaiver = action?.kind == ArtistActionKind.QueueWaiver || (action == null && canQueueWaiver)
+    val effectiveWaiverDetail = action?.unavailableDetail ?: waiverUnavailableDetail
     Box(modifier = Modifier.fillMaxSize()) {
         AnimatedVisibility(
             modifier = Modifier.fillMaxSize(),
@@ -259,25 +266,25 @@ internal fun ArtistDetailScreen(
                 }
                 ArtistHeroMetricGrid(shownArtist = shownArtist, marketScoreArtist = marketScoreArtist)
             AnimatedVisibility(
-                visible = isInRoster || isWaiverQueued,
+                visible = isInRoster || effectiveWaiverQueued,
                 enter = fadeIn() + expandVertically(),
                 exit = fadeOut() + shrinkVertically()
             ) {
                 ArtistOwnershipBanner(
                     isInRoster = isInRoster,
-                    isWaiverQueued = isWaiverQueued
+                    isWaiverQueued = effectiveWaiverQueued
                 )
             }
             AnimatedVisibility(
-                visible = !isInRoster && !isWaiverQueued && draftStatus == DraftStatus.Complete && !canQueueWaiver,
+                visible = !isInRoster && !effectiveWaiverQueued && draftStatus == DraftStatus.Complete && !effectiveCanQueueWaiver,
                 enter = fadeIn() + expandVertically(),
                 exit = fadeOut() + shrinkVertically()
             ) {
                 ArtistAvailabilityBanner(
-                    detail = if (draftedStatusLabel != null) {
+                    detail = effectiveWaiverDetail ?: if (draftedStatusLabel != null) {
                         "This artist is already on a roster."
                     } else {
-                        "Your roster does not have an open slot for this artist."
+                        "This artist cannot fit an open roster slot right now."
                     }
                 )
             }
@@ -285,16 +292,8 @@ internal fun ArtistDetailScreen(
             BreakoutCard {
                 Text("Draft Profile", style = MaterialTheme.typography.titleLarge)
                 ScoreLine("Role", shownArtist.tag)
-                InfoScoreLine(
-                    label = "Market Value",
-                    value = marketScoreArtist.price,
-                    info = listOf(
-                        "A rough draft-market estimate based mostly on audience scale and current signal.",
-                        "Useful for comparing artist scale at a glance."
-                    )
-                )
+                ScoreLine("Market Value", marketScoreArtist.price)
                 shownArtist.albumCount?.let { ScoreLine("Catalog", "$it releases") }
-                ScoreLine("Read", shownArtist.marketNote)
                 ScoreLine("Risk", shownArtist.riskLabel)
             }
             if (weeklyPoints.isNotEmpty()) {
@@ -338,26 +337,30 @@ internal fun ArtistDetailScreen(
             OverlayBackButton(onClick = onBack)
             TagLabel(shownArtist.tag)
         }
-        if ((canAddToRoster || canQueueWaiver || isWaiverQueued || isInRoster) && (draftedStatusLabel == null || isInRoster)) {
+        val showWaiverAction = draftStatus == DraftStatus.Complete && draftedStatusLabel == null && !isInRoster
+        if ((canAddToRoster || effectiveCanQueueWaiver || effectiveWaiverQueued || isInRoster || showWaiverAction) && (draftedStatusLabel == null || isInRoster || effectiveCanQueueWaiver || showWaiverAction)) {
             RosterToggleButton(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .navigationBarsPadding()
                     .padding(end = BreakoutDimensions.lg, bottom = BreakoutDimensions.lg),
                 added = isInRoster,
-                waiver = canQueueWaiver || isWaiverQueued,
-                waiverCancel = isWaiverQueued,
+                waiver = effectiveCanQueueWaiver || effectiveWaiverQueued || action?.kind == ArtistActionKind.WaiverQueueFull,
+                waiverCancel = effectiveWaiverQueued,
                 size = 64.dp,
                 solid = false,
                 onClick = when {
                     isInRoster -> ({ confirmRemove = true })
-                    isWaiverQueued -> onCancelWaiver
-                    canQueueWaiver -> ({
+                    effectiveWaiverQueued -> onCancelWaiver
+                    effectiveCanQueueWaiver -> ({
                         if (waiverReplacementOptions.isNotEmpty()) {
                             chooseWaiverDrop = true
                         } else {
                             onQueueWaiver(null)
                         }
+                    })
+                    showWaiverAction -> ({
+                        Toast.makeText(context, effectiveWaiverDetail ?: "Waiver is unavailable right now.", Toast.LENGTH_SHORT).show()
                     })
                     else -> onDraftPick
                 }
@@ -375,15 +378,15 @@ internal fun ArtistDetailScreen(
             )
         }
         if (confirmRemove) {
-            val losesGrandfathered = shownArtist.isGrandfatheredFor()
+            val losesLegacyEligibility = shownArtist.isGrandfatheredFor()
             ConfirmActionCard(
-                title = if (losesGrandfathered) "Lose Grandfathered Eligibility?" else "Drop ${shownArtist.displayName()}?",
-                detail = if (losesGrandfathered) {
-                    "${shownArtist.displayName()} is currently a ${shownArtist.currentRoleLabel()} but retains ${shownArtist.acquiredRole} eligibility. If you drop this artist, that retained eligibility is permanently lost."
+                title = if (losesLegacyEligibility) "Lose Legacy Eligibility?" else "Drop ${shownArtist.displayName()}?",
+                detail = if (losesLegacyEligibility) {
+                    "${shownArtist.displayName()} is now a ${shownArtist.currentRoleLabel()} but remains ${shownArtist.acquiredRole} Eligible because they were acquired in that role.\n\nIf you drop them, this eligibility will be permanently lost. If you add them again later, they will use their current role."
                 } else {
                     "This removes the artist from your roster."
                 },
-                confirmText = if (losesGrandfathered) "Drop Anyway" else "Drop",
+                confirmText = if (losesLegacyEligibility) "Drop Anyway" else "Drop",
                 onCancel = { confirmRemove = false },
                 onConfirm = {
                     confirmRemove = false
@@ -497,23 +500,20 @@ private fun ArtistMarketIntelCard(shownArtist: ArtistUi, marketScoreArtist: Arti
                 listOfNotNull(city, shownArtist.topCityListenersLabel).joinToString(" - ")
             )
         }
-        if (shownArtist.acquiredRole != null) {
+        if (shownArtist.isGrandfatheredFor()) {
             ScoreLine("Current Role", shownArtist.currentRoleLabel())
-            ScoreLine(
-                "Roster Eligibility",
-                if (shownArtist.isGrandfatheredFor()) {
-                    "${shownArtist.acquiredRole} - Grandfathered"
-                } else {
-                    shownArtist.acquiredRole
-                }
+            ScoreLine("Roster Eligibility", "${shownArtist.acquiredRole} Eligible")
+            Text(
+                "Legacy Eligibility",
+                color = WaiverAccent,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold
             )
-            if (shownArtist.isGrandfatheredFor()) {
-                Text(
-                    "This artist was acquired while eligible as a ${shownArtist.acquiredRole} and may remain in that slot while continuously rostered.",
-                    color = BreakoutTextSecondary,
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            }
+            Text(
+                "This artist was acquired as a ${shownArtist.acquiredRole} and remains eligible for that role while continuously rostered.",
+                color = BreakoutTextSecondary,
+                style = MaterialTheme.typography.bodyMedium
+            )
         }
         ScoreLine("Fantasy Read", shownArtist.marketNote)
     }
@@ -1573,7 +1573,7 @@ internal fun RosterSlotCard(
                     verticalArrangement = Arrangement.Center
                 ) {
                     Text(
-                        if (shownArtist?.isGrandfatheredFor(slot) == true) "${shownArtist.currentRoleLabel()} now" else slot.label,
+                        if (shownArtist?.isGrandfatheredFor(slot) == true) "Now ${shownArtist.currentRoleLabel()}" else slot.label,
                         color = BreakoutSecondary,
                         style = MaterialTheme.typography.labelLarge,
                         maxLines = 1
@@ -1587,7 +1587,7 @@ internal fun RosterSlotCard(
                     )
                     Text(
                         if (shownArtist?.isGrandfatheredFor(slot) == true) {
-                            "${shownArtist.acquiredRole} slot retained"
+                            "${shownArtist.acquiredRole} Eligible"
                         } else {
                             shownArtist?.audienceLabel ?: slot.hint
                         },
@@ -1956,8 +1956,8 @@ internal fun AlertNoticeCard(
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(BreakoutDimensions.CardCornerRadius),
-        colors = CardDefaults.cardColors(containerColor = BreakoutSurfaceVariant.copy(alpha = 0.72f)),
+        shape = RoundedCornerShape(BreakoutDimensions.SmallCornerRadius),
+        colors = CardDefaults.cardColors(containerColor = BreakoutSurfaceVariant.copy(alpha = 0.66f)),
         border = BorderStroke(1.dp, accent.copy(alpha = 0.42f))
     ) {
         Column(
@@ -1968,17 +1968,17 @@ internal fun AlertNoticeCard(
                         listOf(accent.copy(alpha = 0.18f), Color.Transparent)
                     )
                 )
-                .padding(BreakoutDimensions.CardPadding),
-            verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.md)
+                .padding(horizontal = BreakoutDimensions.md, vertical = BreakoutDimensions.sm),
+            verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.md),
+                horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
                     modifier = Modifier
-                        .size(38.dp)
+                        .size(30.dp)
                         .clip(CircleShape)
                         .background(accent.copy(alpha = 0.18f))
                         .border(1.dp, accent.copy(alpha = 0.45f), CircleShape),
@@ -1989,34 +1989,20 @@ internal fun AlertNoticeCard(
                 Text(
                     title,
                     modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.titleMedium,
+                    style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold
                 )
             }
             messages.forEach { message ->
-                Row(
+                Text(
+                    message,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(BreakoutDimensions.SmallCornerRadius))
-                        .background(BreakoutSurface.copy(alpha = 0.42f))
-                        .then(if (onMessageClick != null) Modifier.clickable { onMessageClick(message) } else Modifier)
-                        .padding(horizontal = BreakoutDimensions.md, vertical = BreakoutDimensions.sm),
-                    horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .clip(CircleShape)
-                            .background(accent)
-                    )
-                    Text(
-                        message,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
+                        .then(if (onMessageClick != null) Modifier.clickable { onMessageClick(message) } else Modifier),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    style = MaterialTheme.typography.bodyMedium,
+                    lineHeight = 20.sp
+                )
             }
         }
     }
@@ -2036,38 +2022,13 @@ internal fun ScoreLine(label: String, value: String) {
 
 @Composable
 internal fun InfoScoreLine(label: String, value: String, info: List<String>) {
-    var showInfo by remember { mutableStateOf(false) }
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm),
+        horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier = Modifier.weight(1f),
-            horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.xs),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(label, color = BreakoutTextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Box(
-                modifier = Modifier
-                    .size(22.dp)
-                    .clip(CircleShape)
-                    .background(BreakoutSurfaceVariant)
-                    .border(1.dp, BreakoutOutline.copy(alpha = 0.45f), CircleShape)
-                    .clickable { showInfo = true },
-                contentAlignment = Alignment.Center
-            ) {
-                Text("?", color = BreakoutSecondary, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-            }
-        }
+        Text(label, color = BreakoutTextSecondary, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(value, style = MaterialTheme.typography.labelLarge, textAlign = TextAlign.End, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    }
-    if (showInfo) {
-        SignalInfoDialog(
-            title = label,
-            details = info,
-            onDismiss = { showInfo = false }
-        )
     }
 }
 
@@ -3559,7 +3520,7 @@ internal fun friendlyTradeError(rawMessage: String?): String {
         message.contains("not a member", ignoreCase = true) -> "That member is not available for trades."
         message.contains("not active", ignoreCase = true) -> "That trade is no longer active."
         message.contains("expired", ignoreCase = true) -> "That trade offer has expired."
-        message.contains("8 active outgoing", ignoreCase = true) -> "You already have 8 active outgoing trades. Cancel one before sending another."
+        message.contains("active outgoing", ignoreCase = true) -> "You already have 5 active outgoing trades. Cancel one before sending another."
         message.contains("no longer has", ignoreCase = true) ||
             message.contains("already moved", ignoreCase = true) -> "One of those artists moved rosters. Refresh trades and try again."
         message.contains("does not fit", ignoreCase = true) ||
@@ -3592,6 +3553,83 @@ internal fun claimableSlotFor(
     settings: LeagueSettingsUi
 ): RosterSlot? = firstOpenSlotFor(artist, roster, settings)
     ?: waiverReplacementOptionsFor(artist, roster, settings).firstOrNull()?.first
+
+internal enum class ArtistActionKind {
+    None,
+    Draft,
+    QueueWaiver,
+    WaiverQueueFull,
+    CancelWaiver,
+    Drop,
+    WaiverUnavailable
+}
+
+internal data class ResolvedArtistAction(
+    val kind: ArtistActionKind,
+    val draftedByYou: Boolean = false,
+    val draftedByOther: Boolean = false,
+    val waiverQueued: Boolean = false,
+    val waiverQueuePosition: Int? = null,
+    val statusLabel: String? = null,
+    val unavailableDetail: String? = null
+) {
+    val canReveal: Boolean
+        get() = kind != ArtistActionKind.None
+}
+
+internal fun resolveArtistAction(
+    artist: ArtistUi,
+    roster: Map<RosterSlot, ArtistUi>,
+    draftPicks: List<DraftPickUi>,
+    waiverQueuedNames: Set<String>,
+    leagueSettings: LeagueSettingsUi,
+    draftStatus: DraftStatus,
+    draftPickMode: Boolean,
+    canMakeDraftPick: Boolean,
+    readOnly: Boolean = false
+): ResolvedArtistAction {
+    val artistKey = artist.name.lowercase()
+    val draftedPick = draftPicks.firstOrNull { it.artist.name.equals(artist.name, ignoreCase = true) }
+    val draftedByYou = roster.values.any { it.name.equals(artist.name, ignoreCase = true) }
+    val drafted = draftedPick != null
+    val draftedByOther = drafted && !draftedByYou
+    val waiverQueued = artistKey in waiverQueuedNames
+    val waiverQueuePosition = waiverQueuedNames.toList().indexOf(artistKey).takeIf { it >= 0 }?.plus(1)
+    val claimableSlot = claimableSlotFor(artist, roster, leagueSettings)
+    val openDraftSlot = firstOpenSlotFor(artist, roster, leagueSettings)
+    val base = ResolvedArtistAction(
+        kind = ArtistActionKind.None,
+        draftedByYou = draftedByYou,
+        draftedByOther = draftedByOther,
+        waiverQueued = waiverQueued,
+        waiverQueuePosition = waiverQueuePosition,
+        statusLabel = when {
+            draftedByYou -> "On Roster"
+            draftedByOther -> "Taken"
+            else -> null
+        }
+    )
+    if (readOnly) return base
+    return when {
+        draftedByYou -> base.copy(kind = ArtistActionKind.Drop)
+        waiverQueued -> base.copy(kind = ArtistActionKind.CancelWaiver)
+        draftPickMode && draftStatus == DraftStatus.Live && canMakeDraftPick && !drafted && openDraftSlot != null ->
+            base.copy(kind = ArtistActionKind.Draft)
+        draftStatus == DraftStatus.Complete && !drafted && claimableSlot != null && waiverQueuedNames.size < leagueSettings.maxWaiverClaims ->
+            base.copy(kind = ArtistActionKind.QueueWaiver)
+        draftStatus == DraftStatus.Complete && !drafted && claimableSlot != null ->
+            base.copy(
+                kind = ArtistActionKind.WaiverQueueFull,
+                unavailableDetail = "Your waiver queue is full. Cancel a claim before adding another."
+            )
+        draftStatus == DraftStatus.Complete && !drafted ->
+            base.copy(
+                kind = ArtistActionKind.WaiverUnavailable,
+                unavailableDetail = "This artist cannot fit an open roster slot right now."
+            )
+        else -> base
+    }
+}
 
 internal fun preferredSlotsFor(artist: ArtistUi): List<RosterSlot> = when {
     artist.isHeadlinerEligible() -> headlinerSlots() + benchSlots()
@@ -4271,6 +4309,19 @@ internal fun currentLeagueWeek(league: LeagueUi, weekOffset: Int = 0): Int {
     val weekOneStart = leagueWeekOneStartDate(league) ?: return 1
     val daysSinceWeekOne = ChronoUnit.DAYS.between(weekOneStart, LocalDate.now()).coerceAtLeast(0)
     return (((daysSinceWeekOne / 7) + 1).toInt() + weekOffset).coerceIn(1, league.settings.seasonWeeks.coerceAtLeast(1))
+}
+
+internal fun completedLeagueWeeks(league: LeagueUi, weekOffset: Int = 0): Int {
+    if (league.draftStatus != DraftStatus.Complete) return 0
+    val currentWeek = currentLeagueWeek(league, weekOffset)
+    return (currentWeek - 1).coerceIn(0, league.settings.seasonWeeks.coerceAtLeast(1))
+}
+
+internal fun isRosterNaturallyLockedForScoring(league: LeagueUi, today: LocalDate = LocalDate.now()): Boolean {
+    if (league.draftStatus != DraftStatus.Complete) return false
+    val weekOneStart = leagueWeekOneStartDate(league) ?: return false
+    if (today.isBefore(weekOneStart)) return false
+    return today.dayOfWeek in DayOfWeek.MONDAY..DayOfWeek.FRIDAY
 }
 
 internal fun leagueWeekOneStartDate(league: LeagueUi): LocalDate? {

@@ -51,7 +51,19 @@ import com.vevaan.breakout.ui.theme.BreakoutSurface
 import com.vevaan.breakout.ui.theme.BreakoutSurfaceVariant
 import com.vevaan.breakout.ui.theme.BreakoutTextSecondary
 
-private const val MaxActiveOutgoingTrades = 8
+private const val MaxActiveOutgoingTrades = 5
+
+private enum class TradeCenterTab(val label: String) {
+    Inbox("Inbox"),
+    Sent("Sent"),
+    League("League")
+}
+
+private enum class TradeLeagueFilter(val label: String) {
+    Pending("Pending Processing"),
+    Completed("Completed"),
+    All("All")
+}
 
 @Composable
 internal fun TradeScreen(
@@ -61,6 +73,7 @@ internal fun TradeScreen(
     draftPicks: List<DraftPickUi>,
     members: List<LeagueMemberUi>?,
     tradeOffers: List<TradeOfferUi>,
+    nextTradeProcessingAt: String? = null,
     refreshing: Boolean,
     onRefresh: () -> Unit,
     onOpenMenu: () -> Unit,
@@ -70,6 +83,8 @@ internal fun TradeScreen(
     onAcceptTrade: (TradeOfferUi) -> Unit,
     onDeclineTrade: (TradeOfferUi) -> Unit,
     onCancelTrade: (TradeOfferUi) -> Unit,
+    onProcessTrade: (TradeOfferUi) -> Unit = {},
+    canProcessAcceptedTrades: Boolean = false,
     onArtistSelected: (ArtistUi) -> Unit
 ) {
     val selfName = account?.username.orEmpty()
@@ -105,6 +120,16 @@ internal fun TradeScreen(
         }
     } == true
     val activeOutgoingTrades = tradeOffers.count { it.status == "pending" && it.outgoing }
+    val inboxOffers = tradeOffers.filter { it.status == "pending" && it.incoming }
+    val sentActiveOffers = tradeOffers.filter { it.status == "pending" && it.outgoing }
+    val sentHistoryOffers = tradeOffers.filter {
+        it.outgoing && it.status in setOf("canceled", "declined", "expired")
+    }
+    val leagueTradeOffers = tradeOffers.filter { it.status in setOf("accepted", "processed", "failed") }
+    var selectedTab by rememberSaveable(league.id) { mutableStateOf(TradeCenterTab.Inbox) }
+    var sentHistoryVisible by rememberSaveable(league.id) { mutableStateOf(false) }
+    var leagueFilter by rememberSaveable(league.id) { mutableStateOf(TradeLeagueFilter.Pending) }
+    var pendingProcess by rememberSaveable(league.id) { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
     var scrollToSentOffer by rememberSaveable(league.id) { mutableStateOf(false) }
     val validation = tradeValidation(
@@ -116,6 +141,7 @@ internal fun TradeScreen(
     )
         ?: if (activeOutgoingTrades >= MaxActiveOutgoingTrades) "You already have $MaxActiveOutgoingTrades active outgoing trades. Cancel one before sending another." else null
         ?: if (duplicatePendingOffer) "You already sent this exact trade. Change the artists or cancel the open offer first." else null
+        ?: if (selectedMember?.isBotManaged == true && selectedMember.username.isReservedBotUsername().not()) "Bot-managed teams are not accepting trades right now." else null
 
     ScreenColumn(
         refreshing = refreshing,
@@ -129,13 +155,18 @@ internal fun TradeScreen(
         ) {
             Text("Trade Center", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
             Text(
-                "Build multi-artist offers. Trades expire after 48 hours and process instantly when accepted.",
+                "Build multi-artist offers. Accepted trades queue for weekly processing.",
                 color = BreakoutTextSecondary,
                 style = MaterialTheme.typography.bodyMedium
             )
+            TimerLine(
+                title = "Next trade processing",
+                timestamp = nextTradeProcessingAt,
+                unavailable = "Trade processing time unavailable"
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.CardSpacing)) {
-                StatTile("Pending", tradeOffers.count { it.status == "pending" }.toString(), "Open offers", Modifier.weight(1f))
-                StatTile("Outgoing", "$activeOutgoingTrades/$MaxActiveOutgoingTrades", "Active sent", Modifier.weight(1f))
+                StatTile("Inbox", inboxOffers.size.toString(), "Needs response", Modifier.weight(1f))
+                StatTile("Sent", "$activeOutgoingTrades/$MaxActiveOutgoingTrades", "Active", Modifier.weight(1f))
             }
         }
 
@@ -143,6 +174,14 @@ internal fun TradeScreen(
             StatusCard("Trades Locked", "Trades open after the draft is complete.")
             return@ScreenColumn
         }
+
+        TradeCenterTabs(
+            selected = selectedTab,
+            inboxCount = inboxOffers.size,
+            sentCount = activeOutgoingTrades,
+            leagueCount = leagueTradeOffers.count { it.status == "accepted" },
+            onSelected = { selectedTab = it }
+        )
 
         BreakoutCard {
             Text("Build Offer", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
@@ -176,12 +215,12 @@ internal fun TradeScreen(
                 if (validation != null) {
                     StatusCard("Trade Check", validation)
                 }
-                val grandfatheredTradeArtists = (offeredItems + requestedItems).filter { it.artist.isGrandfatheredFor() }
-                if (grandfatheredTradeArtists.isNotEmpty()) {
+                val legacyTradeArtists = (offeredItems + requestedItems).filter { it.artist.isGrandfatheredFor() }
+                if (legacyTradeArtists.isNotEmpty()) {
                     StatusCard(
-                        "Grandfathered Eligibility Transfers",
-                        grandfatheredTradeArtists.joinToString { item ->
-                            "${item.artist.name} keeps ${item.artist.acquiredRole} eligibility if the trade is accepted."
+                        "Legacy Eligibility Transfers",
+                        legacyTradeArtists.joinToString { item ->
+                            "${item.artist.name} is now a ${item.artist.currentRoleLabel()} but remains ${item.artist.acquiredRole} Eligible. This eligibility transfers if accepted."
                         }
                     )
                 }
@@ -200,22 +239,111 @@ internal fun TradeScreen(
             }
         }
 
-        BreakoutCard {
-            Text("Offers", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
-            if (tradeOffers.isEmpty()) {
-                Text("No trade offers yet.", color = BreakoutTextSecondary)
-            } else {
-                tradeOffers.forEach { offer ->
-                    TradeOfferCard(
-                        offer = offer,
-                        selfName = selfName,
-                        onAccept = { onAcceptTrade(offer) },
-                        onDecline = { onDeclineTrade(offer) },
-                        onCancel = { onCancelTrade(offer) },
-                        onArtistSelected = onArtistSelected
-                    )
+        AnimatedContent(
+            targetState = selectedTab,
+            transitionSpec = { (fadeIn(tween(180)) + slideInVertically { it / 8 }) togetherWith (fadeOut(tween(120)) + slideOutVertically { -it / 10 }) },
+            label = "tradeCenterTabs"
+        ) { tab ->
+            BreakoutCard {
+                when (tab) {
+                    TradeCenterTab.Inbox -> {
+                        Text("Inbox", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                        if (inboxOffers.isEmpty()) {
+                            Text("No offers need your response.", color = BreakoutTextSecondary)
+                        } else {
+                            inboxOffers.forEach { offer ->
+                                TradeOfferCard(
+                                    offer = offer,
+                                    selfName = selfName,
+                                    onAccept = { onAcceptTrade(offer) },
+                                    onDecline = { onDeclineTrade(offer) },
+                                    onCancel = { onCancelTrade(offer) },
+                                    onProcess = {},
+                                    canProcess = false,
+                                    onArtistSelected = onArtistSelected
+                                )
+                            }
+                        }
+                    }
+                    TradeCenterTab.Sent -> {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Sent", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                            Text("$activeOutgoingTrades/$MaxActiveOutgoingTrades", color = WaiverAccent, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)) {
+                            TradeFilterChip("Active", !sentHistoryVisible) { sentHistoryVisible = false }
+                            TradeFilterChip("History", sentHistoryVisible) { sentHistoryVisible = true }
+                        }
+                        val visibleSent = if (sentHistoryVisible) sentHistoryOffers else sentActiveOffers
+                        if (visibleSent.isEmpty()) {
+                            Text(if (sentHistoryVisible) "No sent history yet." else "No active sent offers.", color = BreakoutTextSecondary)
+                        } else {
+                            visibleSent.forEach { offer ->
+                                TradeOfferCard(
+                                    offer = offer,
+                                    selfName = selfName,
+                                    onAccept = {},
+                                    onDecline = {},
+                                    onCancel = { onCancelTrade(offer) },
+                                    onProcess = {},
+                                    canProcess = false,
+                                    onArtistSelected = onArtistSelected
+                                )
+                            }
+                        }
+                    }
+                    TradeCenterTab.League -> {
+                        Text("League Trades", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                        TimerLine("Next trade processing", nextTradeProcessingAt, "Trade processing time unavailable")
+                        Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)) {
+                            TradeLeagueFilter.entries.forEach { filter ->
+                                TradeFilterChip(filter.label, leagueFilter == filter) { leagueFilter = filter }
+                            }
+                        }
+                        val visibleLeagueTrades = leagueTradeOffers.filter { offer ->
+                            when (leagueFilter) {
+                                TradeLeagueFilter.Pending -> offer.status == "accepted"
+                                TradeLeagueFilter.Completed -> offer.status == "processed"
+                                TradeLeagueFilter.All -> true
+                            }
+                        }
+                        if (visibleLeagueTrades.isEmpty()) {
+                            Text("Accepted and completed league trades will appear here.", color = BreakoutTextSecondary)
+                        } else {
+                            visibleLeagueTrades.forEach { offer ->
+                                TradeOfferCard(
+                                    offer = offer,
+                                    selfName = selfName,
+                                    onAccept = {},
+                                    onDecline = {},
+                                    onCancel = {},
+                                    onProcess = { pendingProcess = offer.id },
+                                    canProcess = canProcessAcceptedTrades && offer.status == "accepted",
+                                    onArtistSelected = onArtistSelected
+                                )
+                            }
+                        }
+                    }
                 }
             }
+        }
+
+        val processOffer = leagueTradeOffers.firstOrNull { it.id == pendingProcess }
+        if (processOffer != null) {
+            ConfirmActionCard(
+                title = "Process this trade now?",
+                detail = "The artists will immediately change teams. This action will appear in League Activity.",
+                confirmText = "Process Trade",
+                onCancel = { pendingProcess = null },
+                onConfirm = {
+                    pendingProcess = null
+                    onProcessTrade(processOffer)
+                }
+            )
         }
     }
 
@@ -296,6 +424,65 @@ private fun TradeMemberPicker(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun TradeCenterTabs(
+    selected: TradeCenterTab,
+    inboxCount: Int,
+    sentCount: Int,
+    leagueCount: Int,
+    onSelected: (TradeCenterTab) -> Unit
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm), modifier = Modifier.fillMaxWidth()) {
+        TradeCenterTab.entries.forEach { tab ->
+            val count = when (tab) {
+                TradeCenterTab.Inbox -> inboxCount
+                TradeCenterTab.Sent -> sentCount
+                TradeCenterTab.League -> leagueCount
+            }
+            Surface(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(BreakoutDimensions.SmallCornerRadius))
+                    .clickable { onSelected(tab) },
+                color = if (tab == selected) BreakoutPrimary.copy(alpha = 0.22f) else BreakoutSurfaceVariant.copy(alpha = 0.62f),
+                shape = RoundedCornerShape(BreakoutDimensions.SmallCornerRadius),
+                border = BorderStroke(1.dp, if (tab == selected) BreakoutPrimary.copy(alpha = 0.60f) else BreakoutOutline.copy(alpha = 0.30f))
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = BreakoutDimensions.sm, vertical = BreakoutDimensions.sm),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(tab.label, color = if (tab == selected) BreakoutPrimary else BreakoutTextSecondary, fontWeight = FontWeight.Black, maxLines = 1)
+                    if (count > 0) {
+                        Text("  $count", color = WaiverAccent, fontWeight = FontWeight.Black, maxLines = 1)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TradeFilterChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    Surface(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .clickable(onClick = onClick),
+        color = if (selected) BreakoutPrimary.copy(alpha = 0.20f) else BreakoutSurfaceVariant.copy(alpha = 0.55f),
+        shape = RoundedCornerShape(999.dp),
+        border = BorderStroke(1.dp, if (selected) BreakoutPrimary.copy(alpha = 0.52f) else BreakoutOutline.copy(alpha = 0.32f))
+    ) {
+        Text(
+            label,
+            modifier = Modifier.padding(horizontal = BreakoutDimensions.md, vertical = BreakoutDimensions.xs),
+            color = if (selected) BreakoutPrimary else BreakoutTextSecondary,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Bold
+        )
     }
 }
 
@@ -381,6 +568,8 @@ private fun TradeOfferCard(
     onAccept: () -> Unit,
     onDecline: () -> Unit,
     onCancel: () -> Unit,
+    onProcess: () -> Unit,
+    canProcess: Boolean,
     onArtistSelected: (ArtistUi) -> Unit
 ) {
     Surface(
@@ -393,17 +582,25 @@ private fun TradeOfferCard(
             modifier = Modifier.padding(BreakoutDimensions.md),
             verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
         ) {
-            Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+            Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     when {
                         offer.incoming -> "Incoming Offer"
                         offer.outgoing -> "Sent Offer"
                         else -> "League Offer"
                     },
+                    modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Black
+                    fontWeight = FontWeight.Black,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
-                Text(offer.status.replaceFirstChar { it.uppercase() }, color = tradeAccent(offer), fontWeight = FontWeight.Bold)
+                Text(
+                    offer.statusLabel(),
+                    color = tradeAccent(offer),
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1
+                )
             }
             val proposerIsSelf = offer.proposerUsername.equals(selfName, ignoreCase = true)
             val recipientIsSelf = offer.recipientUsername.equals(selfName, ignoreCase = true)
@@ -425,6 +622,38 @@ private fun TradeOfferCard(
                 rightItems = rightItems,
                 onArtistSelected = onArtistSelected
             )
+            when (offer.status) {
+                "accepted" -> {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.xs)) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(BreakoutPrimary)
+                        )
+                        Text("Pending Processing", color = BreakoutPrimary, fontWeight = FontWeight.Black)
+                    }
+                    TimerLine(
+                        title = "Processes",
+                        timestamp = offer.processingAt,
+                        unavailable = "Processing time unavailable"
+                    )
+                    if (canProcess) {
+                        SecondaryButton("Process Now", modifier = Modifier.fillMaxWidth(), onClick = onProcess)
+                    }
+                }
+                "processed" -> TimerLine(
+                    title = "Completed",
+                    timestamp = offer.processedAt,
+                    unavailable = "Completed"
+                )
+                "failed" -> Text(
+                    offer.failureReason ?: "Trade failed validation at processing.",
+                    color = BreakoutCoral,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
             if (offer.status == "pending") {
                 Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)) {
                     if (offer.incoming) {
@@ -555,8 +784,17 @@ private fun simulateTradeAdds(
 
 private fun tradeAccent(offer: TradeOfferUi) = when (offer.status) {
     "accepted" -> BreakoutPrimary
+    "processed" -> BreakoutPrimary
+    "failed" -> BreakoutCoral
     "declined", "canceled", "expired" -> BreakoutCoral
     else -> if (offer.incoming) WaiverAccent else BreakoutPrimary
+}
+
+private fun TradeOfferUi.statusLabel(): String = when (status) {
+    "accepted" -> "Accepted"
+    "processed" -> "Completed"
+    "failed" -> "Failed"
+    else -> status.replaceFirstChar { it.uppercase() }
 }
 
 private fun Set<String>.toggle(value: String): Set<String> =

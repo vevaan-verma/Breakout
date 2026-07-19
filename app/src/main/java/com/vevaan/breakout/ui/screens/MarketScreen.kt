@@ -366,10 +366,7 @@ internal fun MarketScreen(
         searchPreparedKey = null
         computedSearchRows = null
         if (effectiveQuery.isNotBlank()) onClearSearchResults(dataKey)
-        artistListVisible = false
-        delay(80)
         listState.smoothMarketScrollToTop()
-        artistListVisible = true
     }
 
     LaunchedEffect(draftPickMode, canMakeDraftPick, currentPickIndex) {
@@ -912,69 +909,58 @@ internal fun MarketScreen(
                                 exit = fadeOut(animationSpec = tween(durationMillis = 150)) +
                                     slideOutHorizontally(animationSpec = tween(durationMillis = 170)) { it / 8 }
                             ) {
-                                val draftedPick = draftedByArtist[artist.name.lowercase()]
-                                val draftedByYou = roster.values.any { it.name == artist.name }
-                                val drafted = draftedPick != null
-                                val draftedByOther = drafted && !draftedByYou
-                                val waiverQueued = artist.name.lowercase() in waiverQueuedNames
-                                val canQueueFromMarket = !draftPickMode &&
-                                    draftStatus == DraftStatus.Complete &&
-                                    draftedPick == null &&
-                                    waiverQueuedNames.size < leagueSettings.maxWaiverClaims &&
-                                    !waiverQueued &&
-                                    !draftedByYou &&
-                                    claimableSlotFor(artist, roster, leagueSettings) != null
-                                val canShowFullQueueWaiver = !draftPickMode &&
-                                    draftStatus == DraftStatus.Complete &&
-                                    draftedPick == null &&
-                                    waiverQueuedNames.size >= leagueSettings.maxWaiverClaims &&
-                                    !waiverQueued &&
-                                    !draftedByYou &&
-                                    claimableSlotFor(artist, roster, leagueSettings) != null
-                                val canDraftFromMarket = draftPickMode &&
-                                    canMakeDraftPick &&
-                                    !drafted &&
-                                    !draftedByYou &&
-                                    firstOpenSlotFor(artist, roster, leagueSettings) != null
-                                val hasSwipeAction = draftedByYou || waiverQueued || canDraftFromMarket || canQueueFromMarket || canShowFullQueueWaiver
+                                val action = resolveArtistAction(
+                                    artist = artist,
+                                    roster = roster,
+                                    draftPicks = draftPicks,
+                                    waiverQueuedNames = waiverQueuedNames,
+                                    leagueSettings = leagueSettings,
+                                    draftStatus = draftStatus,
+                                    draftPickMode = draftPickMode,
+                                    canMakeDraftPick = canMakeDraftPick
+                                )
                                 val artistKey = artist.stableListKey()
                                 ArtistRow(
                                     modifier = Modifier,
                                     artist = artist,
-                                    isInRoster = draftedByYou,
-                                    isDrafted = drafted,
-                                    isDraftedByOther = draftedByOther,
-                                    isWaiverQueued = waiverQueued,
-                                    waiverQueuePosition = waiverQueuePositions[artist.name.lowercase()],
+                                    isInRoster = action.draftedByYou,
+                                    isDrafted = action.draftedByYou || action.draftedByOther,
+                                    isDraftedByOther = action.draftedByOther,
+                                    isWaiverQueued = action.waiverQueued,
+                                    waiverQueuePosition = action.waiverQueuePosition ?: waiverQueuePositions[artist.name.lowercase()],
                                     showRoleTag = effectiveQuery.isNotBlank(),
                                     canRevealActions = true,
                                     actionsOpen = openActionArtistKey == artistKey,
                                     onActionsOpenChange = { open -> onOpenActionArtistKeyChange(if (open) artistKey else null) },
-                                    canToggleRoster = hasSwipeAction,
-                                    waiverAction = canQueueFromMarket || canShowFullQueueWaiver,
-                                    waiverCancelAction = waiverQueued,
-                                    statusLabel = when {
-                                        draftedByYou -> "On Roster"
-                                        draftedByOther -> "Taken"
-                                        else -> null
-                                    },
+                                    canToggleRoster = action.canReveal,
+                                    waiverAction = action.kind == ArtistActionKind.QueueWaiver || action.kind == ArtistActionKind.WaiverQueueFull,
+                                    waiverCancelAction = action.kind == ArtistActionKind.CancelWaiver,
+                                    statusLabel = action.statusLabel,
                                     onClick = { onArtistSelected(artist) },
-                                    onToggleRoster = if (draftedByYou) ({
-                                        pendingActionArtist = artist
-                                        pendingActionLabel = "drop"
-                                    }) else if (canDraftFromMarket) ({
-                                        pendingActionArtist = artist
-                                        pendingActionLabel = "draft"
-                                    }) else if (canQueueFromMarket) ({
-                                        pendingActionArtist = artist
-                                        pendingActionLabel = "waiver"
-                                    }) else if (canShowFullQueueWaiver) ({
-                                        pendingActionArtist = artist
-                                        pendingActionLabel = "waiver_full"
-                                    }) else if (waiverQueued) ({
-                                        pendingActionArtist = artist
-                                        pendingActionLabel = "cancel"
-                                    }) else null
+                                    onToggleRoster = when (action.kind) {
+                                        ArtistActionKind.Drop -> ({
+                                            pendingActionArtist = artist
+                                            pendingActionLabel = "drop"
+                                        })
+                                        ArtistActionKind.Draft -> ({
+                                            pendingActionArtist = artist
+                                            pendingActionLabel = "draft"
+                                        })
+                                        ArtistActionKind.QueueWaiver -> ({
+                                            pendingActionArtist = artist
+                                            pendingActionLabel = "waiver"
+                                        })
+                                        ArtistActionKind.WaiverQueueFull -> ({
+                                            pendingActionArtist = artist
+                                            pendingActionLabel = "waiver_full"
+                                        })
+                                        ArtistActionKind.CancelWaiver -> ({
+                                            pendingActionArtist = artist
+                                            pendingActionLabel = "cancel"
+                                        })
+                                        ArtistActionKind.WaiverUnavailable,
+                                        ArtistActionKind.None -> null
+                                    }
                                 )
                             }
                         }

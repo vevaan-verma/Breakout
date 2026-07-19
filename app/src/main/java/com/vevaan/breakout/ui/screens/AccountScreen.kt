@@ -434,7 +434,11 @@ internal fun MemberReviewRow(
     onKick: () -> Unit
 ) {
     val isSelf = member.username.equals(currentUsername, ignoreCase = true)
-    val accent = if (member.isManager) BreakoutSecondary else BreakoutPrimary
+    val accent = when {
+        member.isManager -> BreakoutSecondary
+        member.isBotManaged || member.isDevBot -> BreakoutPrimary
+        else -> BreakoutPrimary
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -464,7 +468,12 @@ internal fun MemberReviewRow(
         Column(modifier = Modifier.weight(1f)) {
             Text(member.username, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
-                if (member.isManager) "League manager" else "Member",
+                when {
+                    member.isManager -> "League manager"
+                    member.isBotManaged -> "Bot-managed team"
+                    member.isDevBot -> "Test bot"
+                    else -> "Member"
+                },
                 color = BreakoutTextSecondary,
                 style = MaterialTheme.typography.bodyMedium
             )
@@ -473,6 +482,10 @@ internal fun MemberReviewRow(
             Pill("You")
         } else if (member.isManager) {
             Pill("Manager")
+        } else if (member.isBotManaged) {
+            Pill("Bot-managed")
+        } else if (member.isDevBot) {
+            Pill("Bot")
         } else if (canManage) {
             Pill("Manage")
         }
@@ -483,7 +496,8 @@ internal fun MemberReviewRow(
 internal fun MemberDetailDialog(
     member: LeagueMemberUi,
     currentUsername: String,
-    canManage: Boolean,
+    canTransferManager: Boolean,
+    canKick: Boolean,
     canViewRoster: Boolean,
     onDismiss: () -> Unit,
     onViewRoster: () -> Unit,
@@ -515,7 +529,12 @@ internal fun MemberDetailDialog(
                     Text(member.username, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
                         listOfNotNull(
-                            if (member.isManager) "Manager" else "Member",
+                            when {
+                                member.isManager -> "Manager"
+                                member.isBotManaged -> "Bot-managed"
+                                member.isDevBot -> "Bot"
+                                else -> "Member"
+                            },
                             if (isSelf) "You" else null
                         ).joinToString(" - "),
                         color = BreakoutTextSecondary,
@@ -531,7 +550,12 @@ internal fun MemberDetailDialog(
                         modifier = Modifier.padding(BreakoutDimensions.md),
                         verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
                     ) {
-                        ScoreLine("Role", if (member.isManager) "Manager" else "Member")
+                        ScoreLine("Role", when {
+                            member.isManager -> "Manager"
+                            member.isBotManaged -> "Bot-managed"
+                            member.isDevBot -> "Bot"
+                            else -> "Member"
+                        })
                         ScoreLine("Account", if (isSelf) "You" else "League Member")
                     }
                 }
@@ -541,8 +565,10 @@ internal fun MemberDetailDialog(
                         AccentButton(text = "Trade", modifier = Modifier.weight(1f), onClick = onTrade)
                     }
                 }
-                if (canManage) {
+                if (canTransferManager) {
                     AccentButton(text = "Make Manager", modifier = Modifier.fillMaxWidth(), onClick = onTransfer)
+                }
+                if (canKick) {
                     DangerButton(text = "Kick Member", onClick = onKick)
                 }
                 SecondaryButton(text = "Close", modifier = Modifier.fillMaxWidth(), onClick = onDismiss)
@@ -880,7 +906,7 @@ internal fun ChartSignalsCard(artist: ArtistUi) {
             StatTile(
                 label = "Daily Streams",
                 value = artist.kworbDailyStreams?.formatCompact() ?: "--",
-                caption = artist.kworbLeadDailyStreams?.let { "${it.formatCompact()} as lead artist" } ?: "Artist stream pace",
+                caption = artist.kworbLeadDailyStreams?.let { "${it.formatCompact()} lead" } ?: "Daily pace",
                 modifier = Modifier.weight(1f)
             )
         }
@@ -1007,7 +1033,7 @@ internal fun ConfirmActionCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 24.dp, vertical = 22.dp),
-                verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.lg)
+                verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.md)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),

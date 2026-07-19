@@ -105,6 +105,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -307,9 +308,15 @@ internal fun StandingsScreen(
                             )
                         }
                     }
-                    Column(horizontalAlignment = Alignment.End) {
-                        Text(row.pointsFor.formatPoints(), color = BreakoutPrimary, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                        Text("PF", color = BreakoutTextSecondary, style = MaterialTheme.typography.labelSmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(BreakoutDimensions.md), verticalAlignment = Alignment.CenterVertically) {
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text(row.pointsFor.formatPoints(), color = BreakoutPrimary, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                            Text("PF", color = BreakoutTextSecondary, style = MaterialTheme.typography.labelSmall)
+                        }
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text(row.pointsAgainst.formatPoints(), color = BreakoutCoral, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                            Text("PA", color = BreakoutTextSecondary, style = MaterialTheme.typography.labelSmall)
+                        }
                     }
                 }
             }
@@ -504,7 +511,7 @@ internal fun LeagueScreen(
                 )
             }
             ScoreLine("Invite Code", league.inviteCode)
-            ScoreLine("Invites", if (invitesLockedByDraft) "Closed for draft" else league.inviteState)
+            ScoreLine("Invites", if (invitesLockedByDraft) "Closed" else league.inviteState)
             StepperRow(
                 label = "Max Members",
                 value = league.maxMembers.toString(),
@@ -852,22 +859,35 @@ internal fun LeagueScreen(
             ScoreLine("Members", "${league.memberCount}/${league.maxMembers}")
             if (league.isManager) {
                 SecondaryButton(
-                    if (invitesLockedByDraft) "Invites Closed For Draft" else if (league.invitesOpen) "Close Invites" else "Open Invites",
+                    if (invitesLockedByDraft) "Invites Closed" else if (league.invitesOpen) "Close Invites" else "Open Invites",
                     modifier = Modifier.fillMaxWidth(),
                     enabled = league.isManager && !invitesLockedByDraft,
                     onClick = { onUpdateLeague { it.copy(invitesOpen = !it.invitesOpen) } }
                 )
             }
-            Column(verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)) {
+            Column(
+                modifier = Modifier.animateContentSize(),
+                verticalArrangement = Arrangement.spacedBy(BreakoutDimensions.sm)
+            ) {
                 visibleMembers.forEach { member ->
-                    MemberReviewRow(
-                        member = member,
-                        currentUsername = accountUsername,
-                        canManage = league.isManager && mergedMembers.isNotEmpty() && !member.username.isReservedBotUsername(),
-                        onOpen = { selectedMember = member },
-                        onTransfer = { pendingTransfer = member },
-                        onKick = { pendingKick = member }
-                    )
+                    key(member.username.lowercase()) {
+                        AnimatedVisibility(
+                            visible = true,
+                            enter = fadeIn() + slideInVertically { it / 3 } + expandVertically(),
+                            exit = fadeOut() + slideOutVertically { it / 3 } + shrinkVertically()
+                        ) {
+                            MemberReviewRow(
+                                member = member,
+                                currentUsername = accountUsername,
+                        canManage = league.isManager && mergedMembers.isNotEmpty() && !member.isManager &&
+                            !member.isBotManaged &&
+                            !member.username.equals(accountUsername, ignoreCase = true),
+                                onOpen = { selectedMember = member },
+                                onTransfer = { pendingTransfer = member },
+                                onKick = { pendingKick = member }
+                            )
+                        }
+                    }
                 }
             }
             Text(
@@ -975,9 +995,13 @@ internal fun LeagueScreen(
         }
         pendingKick?.let { member ->
             ConfirmActionCard(
-                title = "Remove Member?",
-                detail = "${member.username} will lose access to this league.",
-                confirmText = "Remove",
+                title = "Remove ${member.username}?",
+                detail = if (league.draftStatus == DraftStatus.Lobby || league.draftStatus == DraftStatus.Scheduled) {
+                    "${member.username} will be removed before competitive history starts."
+                } else {
+                    "${member.username} will lose control of the team. The roster, record, schedule, waiver priority, draft history, and completed matchups stay intact. The franchise becomes bot-managed by default."
+                },
+                confirmText = "Remove Member",
                 onCancel = { pendingKick = null },
                 onConfirm = {
                     onKickMember(member.username)
@@ -989,9 +1013,13 @@ internal fun LeagueScreen(
             MemberDetailDialog(
                 member = member,
                 currentUsername = accountUsername,
-                canManage = league.isManager && mergedMembers.isNotEmpty() && !member.isManager &&
+                canTransferManager = league.isManager && mergedMembers.isNotEmpty() && !member.isManager &&
+                    !member.isBotManaged &&
                     !member.username.equals(accountUsername, ignoreCase = true) &&
                     !member.username.isReservedBotUsername(),
+                canKick = league.isManager && mergedMembers.isNotEmpty() && !member.isManager &&
+                    !member.isBotManaged &&
+                    !member.username.equals(accountUsername, ignoreCase = true),
                 canViewRoster = !member.username.equals(accountUsername, ignoreCase = true),
                 onDismiss = { selectedMember = null },
                 onViewRoster = {

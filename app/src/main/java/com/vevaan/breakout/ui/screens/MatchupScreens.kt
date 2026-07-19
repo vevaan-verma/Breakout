@@ -348,7 +348,7 @@ internal fun AllMatchupsScreen(
         .distinctBy { it.lowercase() }
     val weekCount = league.settings.seasonWeeks.coerceAtLeast(1)
     val simulatedInitialWeek = initialWeek.coerceIn(1, weekCount)
-    val scoredThroughWeek = currentLeagueWeek(league, weekOffset)
+    val scoredThroughWeek = completedLeagueWeeks(league, weekOffset)
     var selectedWeek by rememberSaveable(league.id) { mutableStateOf(simulatedInitialWeek) }
     var weekDirection by remember { mutableStateOf(1) }
     var selectedPairIndex by rememberSaveable(league.id) { mutableStateOf(0) }
@@ -496,7 +496,7 @@ internal fun AllMatchupCard(
     val leftRoster = rosterForMemberName(leftName, draftPicks)
     val rightRoster = rightName?.let { rosterForMemberName(it, draftPicks) }.orEmpty()
     val currentScoresAvailable = league.draftStatus == DraftStatus.Complete && week <= scoredThroughWeek
-    val projectedScoresAvailable = week <= scoredThroughWeek
+    val projectedScoresAvailable = week <= scoredThroughWeek + 1
     val leftCurrentScore = if (currentScoresAvailable) startingSlots.mapNotNull { leftRoster[it] }.sumOf { it.actualWeekScore(week) } else null
     val rightCurrentScore = if (currentScoresAvailable) rightName?.let { startingSlots.mapNotNull { rightRoster[it] }.sumOf { artist -> artist.actualWeekScore(week) } } else null
     val leftProjectedScore = if (projectedScoresAvailable) startingSlots.mapNotNull { leftRoster[it] }.sumOf { it.projectedWeekScore(week) } else null
@@ -816,13 +816,13 @@ internal fun MatchupSideCell(
             )
         } else {
             MatchupMetricLine(
-                label = "Current",
+                label = "Current:",
                 value = currentScore?.formatPoints() ?: "--",
-                alignEnd = !isRightSide,
+                alignEnd = isRightSide,
                 primary = true
             )
             MatchupMetricLine(
-                label = "Projected",
+                label = "Projected:",
                 value = projectedScore?.formatPoints() ?: "--",
                 alignEnd = isRightSide,
                 primary = false
@@ -846,14 +846,14 @@ private fun MatchupMetricLine(
         Text(
             "$label ",
             color = BreakoutTextSecondary,
-            style = if (primary) MaterialTheme.typography.titleSmall else MaterialTheme.typography.labelMedium,
+            style = if (primary) MaterialTheme.typography.labelLarge else MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.Bold,
             maxLines = 1
         )
         Text(
             value,
             color = if (primary) BreakoutPrimary else BreakoutTextSecondary,
-            style = if (primary) MaterialTheme.typography.titleSmall else MaterialTheme.typography.labelMedium,
+            style = if (primary) MaterialTheme.typography.labelLarge else MaterialTheme.typography.labelSmall,
             fontWeight = if (primary) FontWeight.Black else FontWeight.Bold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
